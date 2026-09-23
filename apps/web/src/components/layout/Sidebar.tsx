@@ -54,7 +54,14 @@ export function Sidebar() {
         ))}
       </nav>
       <div className="px-5 py-3 border-t border-border text-[11px] text-ink-subtle">
-        Demo data · v0.1
+        <div className="flex items-center justify-between">
+          <span>Demo data · v0.1</span>
+          <span className="flex items-center gap-1.5">
+            <NavLink to="/terms" className="hover:text-ink transition-colors">Terms</NavLink>
+            <span aria-hidden>·</span>
+            <NavLink to="/privacy" className="hover:text-ink transition-colors">Privacy</NavLink>
+          </span>
+        </div>
       </div>
     </aside>
   )
