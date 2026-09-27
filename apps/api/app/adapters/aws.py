@@ -207,6 +207,159 @@ class AWSAdapter:
     def get_prices(self, resource_type: str, region: str) -> list[dict[str, Any]]:
         return []
 
+    def execute_action(
+        self,
+        db: Session,
+        cloud_account_id: uuid.UUID,
+        resource_cloud_id: str,
+        action: str,
+        params: dict,
+    ) -> dict:
+        account = db.get(CloudAccount, cloud_account_id)
+        if account is None:
+            return {"ok": False, "error": "Cloud account not found"}
+        if not account.execution_role_configured:
+            return {"ok": False, "error": "No execution role configured for this account"}
+        if get_settings().mock_adapters:
+            return self._mock_execute(resource_cloud_id, action, params)
+        try:
+            session = self._session_for(account)
+        except Exception as exc:
+            return {"ok": False, "error": f"AssumeRole failed: {exc}"}
 
-def _noop_decrypt(token: str) -> str:
-    return decrypt_secret(token)    
+        try:
+            return self._live_execute(session, account, resource_cloud_id, action, params)
+        except (ClientError, BotoCoreError) as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def _mock_execute(self, resource_cloud_id: str, action: str, params: dict) -> dict:
+        if action == "resize_instance":
+            return {
+                "ok": True,
+                "action": action,
+                "resource": resource_cloud_id,
+                "before": {"instance_type": params.get("current_type", "m5.4xlarge")},
+                "after": {"instance_type": params.get("target_type", "m5.2xlarge")},
+                "rollback_reference": f"rollback:{resource_cloud_id}:{params.get('current_type', 'm5.4xlarge')}",
+            }
+        if action == "stop_instance":
+            return {
+                "ok": True,
+                "action": action,
+                "resource": resource_cloud_id,
+                "before": {"state": "running"},
+                "after": {"state": "stopped"},
+                "rollback_reference": f"rollback:{resource_cloud_id}:start",
+            }
+        if action == "delete_volume":
+            snapshot_id = f"snap-mock-{resource_cloud_id[-8:]}"
+            return {
+                "ok": True,
+                "action": action,
+                "resource": resource_cloud_id,
+                "before": {"state": "available"},
+                "after": {"state": "deleted"},
+                "rollback_reference": snapshot_id,
+            }
+        if action == "release_eip":
+            return {
+                "ok": True,
+                "action": action,
+                "resource": resource_cloud_id,
+                "before": {"associated": False},
+                "after": {"state": "released"},
+                "rollback_reference": None,
+            }
+        if action == "enable_tiering":
+            return {
+                "ok": True,
+                "action": action,
+                "resource": resource_cloud_id,
+                "before": {"storage_class": "STANDARD"},
+                "after": {"storage_class": "INTELLIGENT_TIERING"},
+                "rollback_reference": f"rollback:{resource_cloud_id}:disable_tiering",
+            }
+        return {"ok": False, "error": f"Unsupported action: {action}"}
+
+    def _live_execute(self, session, account: CloudAccount, resource_cloud_id: str, action: str, params: dict) -> dict:
+        region = params.get("region") or (account.regions[0] if account.regions else "us-east-1")
+        ec2 = session.client("ec2", region_name=region, config=BOTO_CONFIG)
+
+        if action == "resize_instance":
+            current = ec2.describe_instances(InstanceIds=[resource_cloud_id])
+            state = current["Reservations"][0]["Instances"][0]["State"]["Name"]
+            if state != "stopped":
+                ec2.stop_instances(InstanceIds=[resource_cloud_id])
+                waiter = ec2.get_waiter("instance_stopped")
+                waiter.wait(InstanceIds=[resource_cloud_id], WaiterConfig={"Delay": 5, "MaxAttempts": 60})
+            before_type = current["Reservations"][0]["Instances"][0]["InstanceType"]
+            ec2.modify_instance_attribute(
+                InstanceId=resource_cloud_id,
+                InstanceType={"Value": params["target_type"]},
+            )
+            ec2.start_instances(InstanceIds=[resource_cloud_id])
+            return {
+                "ok": True,
+                "action": action,
+                "resource": resource_cloud_id,
+                "before": {"instance_type": before_type},
+                "after": {"instance_type": params["target_type"]},
+                "rollback_reference": f"rollback:{resource_cloud_id}:{before_type}",
+            }
+
+        if action == "stop_instance":
+            ec2.stop_instances(InstanceIds=[resource_cloud_id])
+            return {
+                "ok": True,
+                "action": action,
+                "resource": resource_cloud_id,
+                "before": {"state": "running"},
+                "after": {"state": "stopping"},
+                "rollback_reference": f"rollback:{resource_cloud_id}:start",
+            }
+
+        if action == "delete_volume":
+            snap = ec2.create_snapshot(VolumeId=resource_cloud_id, Description="CloudFinOps safety snapshot")
+            ec2.delete_volume(VolumeId=resource_cloud_id)
+            return {
+                "ok": True,
+                "action": action,
+                "resource": resource_cloud_id,
+                "before": {"state": "available"},
+                "after": {"state": "deleted"},
+                "rollback_reference": snap["SnapshotId"],
+            }
+
+        if action == "release_eip":
+            ec2.release_address(AllocationId=resource_cloud_id)
+            return {
+                "ok": True,
+                "action": action,
+                "resource": resource_cloud_id,
+                "before": {"associated": False},
+                "after": {"state": "released"},
+                "rollback_reference": None,
+            }
+
+        if action == "enable_tiering":
+            s3 = session.client("s3", region_name=region, config=BOTO_CONFIG)
+            bucket = resource_cloud_id.replace("arn:aws:s3:::", "")
+            s3.put_bucket_intelligent_tiering_configuration(
+                Bucket=bucket,
+                Id="CloudFinOpsIntelligentTiering",
+                IntelligentTieringConfiguration={
+                    "Id": "CloudFinOpsIntelligentTiering",
+                    "Status": "Enabled",
+                    "Tierings": [{"Days": 90, "AccessTier": "ARCHIVE_ACCESS"}],
+                },
+            )
+            return {
+                "ok": True,
+                "action": action,
+                "resource": resource_cloud_id,
+                "before": {"storage_class": "STANDARD"},
+                "after": {"storage_class": "INTELLIGENT_TIERING"},
+                "rollback_reference": f"rollback:{bucket}:disable_tiering",
+            }
+
+        return {"ok": False, "error": f"Unsupported action: {action}"}    
