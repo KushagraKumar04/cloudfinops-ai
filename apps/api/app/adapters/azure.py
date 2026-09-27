@@ -235,6 +235,100 @@ class AzureAdapter:
     def get_prices(self, resource_type: str, region: str) -> list[dict[str, Any]]:
         return []
 
+    def execute_action(
+        self,
+        db: Session,
+        cloud_account_id: uuid.UUID,
+        resource_cloud_id: str,
+        action: str,
+        params: dict,
+    ) -> dict:
+        account = db.get(CloudAccount, cloud_account_id)
+        if account is None:
+            return {"ok": False, "error": "Cloud account not found"}
+        if not account.execution_role_configured:
+            return {"ok": False, "error": "No execution role configured for this account"}
+        if get_settings().mock_adapters:
+            return self._mock_execute(resource_cloud_id, action, params)
+        try:
+            return self._live_execute(account, resource_cloud_id, action, params)
+        except (ClientAuthenticationError, AzureError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def _mock_execute(self, resource_cloud_id: str, action: str, params: dict) -> dict:
+        if action == "resize_instance":
+            return {
+                "ok": True,
+                "action": action,
+                "resource": resource_cloud_id,
+                "before": {"sku": params.get("current_type", "Standard_D8s_v5")},
+                "after": {"sku": params.get("target_type", "Standard_D4s_v5")},
+                "rollback_reference": f"rollback:{resource_cloud_id}:{params.get('current_type', 'Standard_D8s_v5')}",
+            }
+        if action == "resize_database":
+            return {
+                "ok": True,
+                "action": action,
+                "resource": resource_cloud_id,
+                "before": {"tier": params.get("current_type", "S3")},
+                "after": {"tier": params.get("target_type", "S2")},
+                "rollback_reference": f"rollback:{resource_cloud_id}:{params.get('current_type', 'S3')}",
+            }
+        if action == "stop_instance":
+            return {
+                "ok": True,
+                "action": action,
+                "resource": resource_cloud_id,
+                "before": {"state": "running"},
+                "after": {"state": "deallocated"},
+                "rollback_reference": f"rollback:{resource_cloud_id}:start",
+            }
+        return {"ok": False, "error": f"Unsupported action: {action}"}
+
+    def _live_execute(self, account: CloudAccount, resource_cloud_id: str, action: str, params: dict) -> dict:
+        from azure.mgmt.compute import ComputeManagementClient
+
+        credential = self._credential(account)
+        if action in {"resize_instance", "stop_instance"}:
+            client = ComputeManagementClient(credential, account.subscription_id)
+            parts = resource_cloud_id.split("/")
+            try:
+                rg_idx = parts.index("resourceGroups")
+                resource_group = parts[rg_idx + 1]
+                vm_name = parts[-1]
+            except (ValueError, IndexError):
+                return {"ok": False, "error": "Cannot parse resource ID"}
+
+            vm = client.virtual_machines.get(resource_group, vm_name)
+            before_sku = vm.hardware_profile.vm_size
+
+            if action == "stop_instance":
+                client.virtual_machines.begin_deallocate(resource_group, vm_name).result()
+                return {
+                    "ok": True,
+                    "action": action,
+                    "resource": resource_cloud_id,
+                    "before": {"state": "running"},
+                    "after": {"state": "deallocated"},
+                    "rollback_reference": f"rollback:{resource_cloud_id}:start",
+                }
+
+            if action == "resize_instance":
+                client.virtual_machines.begin_deallocate(resource_group, vm_name).result()
+                vm.hardware_profile.vm_size = params["target_type"]
+                client.virtual_machines.begin_create_or_update(resource_group, vm_name, vm).result()
+                client.virtual_machines.begin_start(resource_group, vm_name).result()
+                return {
+                    "ok": True,
+                    "action": action,
+                    "resource": resource_cloud_id,
+                    "before": {"sku": before_sku},
+                    "after": {"sku": params["target_type"]},
+                    "rollback_reference": f"rollback:{resource_cloud_id}:{before_sku}",
+                }
+
+        return {"ok": False, "error": f"Unsupported action: {action}"}
+
 
 def _classify_service(azure_type: str) -> str:
     t = azure_type.lower()
