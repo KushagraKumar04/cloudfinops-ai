@@ -1,10 +1,55 @@
+import json
+import logging
 import uuid
 from typing import Any
 
+from pydantic import BaseModel, Field, ValidationError
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.ai.tools import ToolContext, ToolResult, execute_tool
+from app.ai.llm import LLMError, LLMProvider, Message, ToolCall, ToolSpec, get_provider
+from app.ai.llm.base import estimate_cost_usd
+from app.ai.llm.prompts import SYSTEM_PROMPT
+from app.ai.tool_schemas import tool_specs
+from app.ai.tools import TOOLS, ToolContext, ToolResult, execute_tool
+from app.config import get_settings
 from app.models.agent_helpers import persist_agent_run
+from app.models.tenant import Tenant
+
+logger = logging.getLogger(__name__)
+
+
+class LLMFindings(BaseModel):
+    severity: str = "info"
+    title: str = ""
+    detail: str = ""
+
+
+class LLMEvidence(BaseModel):
+    label: str = ""
+    value: str = ""
+    source: str = ""
+
+
+class LLMRecommendationRef(BaseModel):
+    id: str = ""
+    title: str = ""
+    estimated_monthly_savings: float = Field(default=0, alias="estimatedMonthlySavings")
+    risk: str = "MEDIUM"
+
+    model_config = {"populate_by_name": True}
+
+
+class LLMAnswer(BaseModel):
+    answer: str = ""
+    findings: list[LLMFindings] = Field(default_factory=list)
+    evidence: list[LLMEvidence] = Field(default_factory=list)
+    recommendations: list[LLMRecommendationRef] = Field(default_factory=list)
+    confidence: float = 0.5
+    requires_human_review: bool = False
+    follow_ups: list[str] | None = Field(default=None, alias="followUps")
+
+    model_config = {"populate_by_name": True}
 
 
 INTENT_PATTERNS: list[tuple[str, list[tuple[str, dict[str, Any]]], list[str]]] = [
@@ -67,7 +112,6 @@ INTENT_PATTERNS: list[tuple[str, list[tuple[str, dict[str, Any]]], list[str]]] =
     ),
 ]
 
-
 KEYWORDS: dict[str, list[str]] = {
     "cost_increase": ["why", "increase", "rise", "spike", "jump", "grew", "higher"],
     "idle": ["idle", "unused", "unattached", "underutil", "stopped"],
@@ -76,7 +120,6 @@ KEYWORDS: dict[str, list[str]] = {
     "storage": ["storage", "s3", "blob", "disk", "volume", "bucket"],
 }
 
-
 PRIORITY_ORDER = ["storage", "idle", "forecast", "top_savings", "cost_increase"]
 
 
@@ -84,9 +127,7 @@ def classify(question: str) -> str:
     q = question.lower()
     for intent in PRIORITY_ORDER:
         if intent == "cost_increase":
-            if ("cost" in q or "spend" in q or "bill" in q) and any(
-                k in q for k in KEYWORDS["cost_increase"]
-            ):
+            if ("cost" in q or "spend" in q or "bill" in q) and any(k in q for k in KEYWORDS["cost_increase"]):
                 return intent
         else:
             if any(k in q for k in KEYWORDS[intent]):
@@ -102,6 +143,259 @@ def plan_for(intent: str) -> tuple[list[str], list[tuple[str, dict[str, Any]]]]:
         ["Clarify the question and retrieve the minimum context needed"],
         [("get_cost_summary", {"range": "30d"})],
     )
+
+
+def _resolve_llm_config(tenant: Tenant) -> dict[str, Any] | None:
+    settings = get_settings()
+    if not settings.llm_enabled:
+        return None
+    if not settings.llm_api_key:
+        return None
+
+    tenant_llm = (tenant.settings or {}).get("llm", {}) or {}
+    provider = settings.llm_provider_override or tenant_llm.get("provider", "openai")
+    model = settings.llm_model_override or tenant_llm.get("model", "gpt-4o-mini")
+    temperature = float(tenant_llm.get("temperature", 0.2))
+    max_tokens = int(tenant_llm.get("maxTokens", 2048))
+
+    return {
+        "provider": provider,
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "api_key": settings.llm_api_key,
+        "base_url": settings.llm_base_url,
+        "api_version": settings.llm_api_version,
+        "timeout": float(settings.llm_timeout_seconds),
+        "max_iterations": int(settings.llm_max_tool_iterations),
+    }
+
+
+def _build_provider(config: dict[str, Any]) -> LLMProvider:
+    provider = get_provider(
+        provider=config["provider"],
+        api_key=config["api_key"],
+        base_url=config.get("base_url", ""),
+        api_version=config.get("api_version", ""),
+    )
+    if hasattr(provider, "_timeout"):
+        provider._timeout = config["timeout"]
+    return provider
+
+
+def _tool_specs_list() -> list[ToolSpec]:
+    return [ToolSpec(name=s["name"], description=s["description"], parameters=s["parameters"]) for s in tool_specs()]
+
+
+def _parse_answer(raw: str | None) -> LLMAnswer:
+    if not raw:
+        raise LLMError("LLM produced no content")
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:].lstrip()
+    try:
+        payload = json.loads(text)
+    except ValueError as exc:
+        raise LLMError(f"LLM content was not JSON: {exc}") from exc
+    try:
+        return LLMAnswer.model_validate(payload)
+    except ValidationError as exc:
+        raise LLMError(f"LLM output failed validation: {exc}") from exc
+
+
+def _summarize_tool_result(result: ToolResult) -> str:
+    payload = {"summary": result.summary, "data": result.data}
+    text = json.dumps(payload, default=str)
+    if len(text) > 1500:
+        text = text[:1500] + "...[truncated]"
+    return text
+
+
+def run_with_llm(
+    db: Session,
+    tenant: Tenant,
+    question: str,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    provider = _build_provider(config)
+    ctx = ToolContext(db=db, tenant_id=tenant.id)
+    specs = _tool_specs_list()
+    catalog = {s.name: s for s in specs}
+
+    messages: list[Message] = [
+        Message(role="system", content=SYSTEM_PROMPT),
+        Message(role="user", content=question),
+    ]
+
+    executed_tools: list[dict[str, Any]] = []
+    plan_steps: list[str] = []
+    total_input = 0
+    total_output = 0
+    last_model = config["model"]
+
+    for iteration in range(config["max_iterations"]):
+        is_last = iteration == config["max_iterations"] - 1
+        if is_last:
+            messages.append(
+                Message(
+                    role="system",
+                    content=(
+                        "You now have enough evidence. Produce the final answer as a single "
+                        "JSON object in the assistant message content. Do not call any tools."
+                    ),
+                )
+            )
+        response = provider.chat(
+            messages=messages,
+            tools=specs,
+            model=config["model"],
+            temperature=config["temperature"],
+            max_tokens=config["max_tokens"],
+            force_json=False,
+            tool_choice="none" if is_last else None,
+        )
+        total_input += response.input_tokens
+        total_output += response.output_tokens
+        last_model = response.model
+
+        if response.tool_calls:
+            messages.append(
+                Message(
+                    role="assistant",
+                    content=response.content,
+                    tool_calls=response.tool_calls,
+                )
+            )
+            for tc in response.tool_calls:
+                if tc.name not in catalog:
+                    result = ToolResult(summary=f"Unknown tool: {tc.name}")
+                else:
+                    result = execute_tool(tc.name, ctx, tc.args or {})
+                executed_tools.append(
+                    {
+                        "id": tc.id or f"tool_{uuid.uuid4().hex[:8]}",
+                        "name": tc.name,
+                        "args": tc.args if isinstance(tc.args, dict) else {},
+                        "result_summary": result.summary,
+                        "duration_ms": result.duration_ms,
+                    }
+                )
+                if not plan_steps:
+                    plan_steps.append(f"Investigate using {tc.name}")
+                messages.append(
+                    Message(
+                        role="tool",
+                        tool_call_id=tc.id,
+                        content=_summarize_tool_result(result),
+                    )
+                )
+            continue
+
+        parsed = _parse_answer(response.content)
+        return _finalize_llm(
+            db=db,
+            tenant_id=tenant.id,
+            parsed=parsed,
+            executed_tools=executed_tools,
+            plan_steps=plan_steps or ["Answer using retrieved context"],
+            total_input=total_input,
+            total_output=total_output,
+            model=last_model,
+        )
+
+    raise LLMError("Max tool iterations reached without a final answer")
+
+
+def _ground_recommendations(
+    db: Session,
+    tenant_id: uuid.UUID,
+    refs: list[LLMRecommendationRef],
+) -> list[dict[str, Any]]:
+    import uuid as _uuid
+
+    from app.models.recommendation import Recommendation
+
+    if not refs:
+        return []
+
+    parsed_ids: list[_uuid.UUID] = []
+    for r in refs:
+        try:
+            parsed_ids.append(_uuid.UUID(r.id))
+        except (ValueError, AttributeError, TypeError):
+            logger.warning("Dropping hallucinated recommendation id: %r", r.id)
+
+    if not parsed_ids:
+        return []
+
+    rows = list(
+        db.execute(
+            select(Recommendation).where(
+                Recommendation.tenant_id == tenant_id,
+                Recommendation.id.in_(parsed_ids),
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    found_ids = {r.id for r in rows}
+    for pid in parsed_ids:
+        if pid not in found_ids:
+            logger.warning("LLM referenced non-existent recommendation: %s", pid)
+
+    by_id = {str(r.id): r for r in rows}
+    out: list[dict[str, Any]] = []
+    for ref in refs:
+        real = by_id.get(ref.id)
+        if real is None:
+            continue
+        out.append(
+            {
+                "id": str(real.id),
+                "title": real.title,
+                "estimated_monthly_savings": float(real.estimated_monthly_savings),
+                "risk": real.risk,
+            }
+        )
+    return out
+
+
+def _finalize_llm(
+    db: Session,
+    tenant_id: uuid.UUID,
+    parsed: LLMAnswer,
+    executed_tools: list[dict[str, Any]],
+    plan_steps: list[str],
+    total_input: int,
+    total_output: int,
+    model: str,
+) -> dict[str, Any]:
+    grounded_recs = _ground_recommendations(db, tenant_id, parsed.recommendations)
+
+    return {
+        "intent": "llm",
+        "plan": plan_steps,
+        "tool_calls": executed_tools,
+        "response": {
+            "answer": parsed.answer or "No answer was produced.",
+            "findings": [f.model_dump() for f in parsed.findings],
+            "evidence": [e.model_dump() for e in parsed.evidence],
+            "recommendations": grounded_recs,
+            "confidence": float(parsed.confidence),
+            "requires_human_review": bool(parsed.requires_human_review),
+            "follow_ups": parsed.follow_ups,
+        },
+        "source": "llm",
+        "usage": {
+            "model": model,
+            "input_tokens": total_input,
+            "output_tokens": total_output,
+            "estimated_cost_usd": estimate_cost_usd(model, total_input, total_output),
+        },
+    }
 
 
 def synthesize(intent: str, question: str, results: list[ToolResult]) -> dict[str, Any]:
@@ -225,9 +519,7 @@ def synthesize(intent: str, question: str, results: list[ToolResult]) -> dict[st
             for r in top
         ]
 
-        answer = (
-            f"{len(recs)} pending recommendations total ${total:,.0f}/month in identified savings."
-        )
+        answer = f"{len(recs)} pending recommendations total ${total:,.0f}/month in identified savings."
 
         evidence = [
             {"label": "Pending recommendations", "value": str(len(recs)), "source": "FinOps engine"},
@@ -265,11 +557,7 @@ def synthesize(intent: str, question: str, results: list[ToolResult]) -> dict[st
         ]
         if current > 0:
             findings.append(
-                {
-                    "severity": "info",
-                    "title": "Trailing 30 days",
-                    "detail": f"${current:,.0f}",
-                }
+                {"severity": "info", "title": "Trailing 30 days", "detail": f"${current:,.0f}"}
             )
 
         evidence = [
@@ -295,11 +583,7 @@ def synthesize(intent: str, question: str, results: list[ToolResult]) -> dict[st
         ][:5]
 
         findings = [
-            {
-                "severity": "warning",
-                "title": r["name"],
-                "detail": f"${r['spend']:,.0f} · {r['change_pct']:+.1f}%",
-            }
+            {"severity": "warning", "title": r["name"], "detail": f"${r['spend']:,.0f} · {r['change_pct']:+.1f}%"}
             for r in storage_rows
         ]
 
@@ -319,7 +603,7 @@ def synthesize(intent: str, question: str, results: list[ToolResult]) -> dict[st
                 "risk": r["risk"],
             }
             for r in (recs_data.get("recommendations") or [])
-            if "storage" in r["title"].lower() or "s3" in r["title"].lower() or "volume" in r["title"].lower() or "blob" in r["title"].lower()
+            if any(k in r["title"].lower() for k in ("storage", "s3", "volume", "blob"))
         ][:4]
 
         return {
@@ -335,8 +619,8 @@ def synthesize(intent: str, question: str, results: list[ToolResult]) -> dict[st
     current = summary_data.get("current", 0)
     return {
         "answer": (
-            f'I can investigate cost changes, idle resources, top savings, forecasts, and storage. '
-            f'Current trailing spend is ${current:,.0f}. Try one of the suggested questions or rephrase with a time range and provider.'
+            f"I can investigate cost changes, idle resources, top savings, forecasts, and storage. "
+            f"Current trailing spend is ${current:,.0f}. Try one of the suggested questions or rephrase with a time range and provider."
         ),
         "findings": [],
         "evidence": [
@@ -354,52 +638,64 @@ def synthesize(intent: str, question: str, results: list[ToolResult]) -> dict[st
     }
 
 
-class Orchestrator:
-    def __init__(self, db: Session, tenant_id: uuid.UUID) -> None:
-        self.db = db
-        self.tenant_id = tenant_id
-        self.ctx = ToolContext(db=db, tenant_id=tenant_id)
+def run_with_rules(db: Session, tenant: Tenant, question: str) -> dict[str, Any]:
+    intent = classify(question)
+    plan_steps, tool_calls = plan_for(intent)
+    ctx = ToolContext(db=db, tenant_id=tenant.id)
 
-    def run(self, question: str) -> dict[str, Any]:
-        intent = classify(question)
-        plan_steps, tool_calls = plan_for(intent)
+    results: list[ToolResult] = []
+    executed: list[dict[str, Any]] = []
+    for name, args in tool_calls:
+        result = execute_tool(name, ctx, args)
+        results.append(result)
+        executed.append(
+            {
+                "id": f"tool_{uuid.uuid4().hex[:8]}",
+                "name": name,
+                "args": args,
+                "result_summary": result.summary,
+                "duration_ms": result.duration_ms,
+            }
+        )
 
-        results: list[ToolResult] = []
-        executed: list[dict[str, Any]] = []
-        for name, args in tool_calls:
-            result = execute_tool(name, self.ctx, args)
-            results.append(result)
-            executed.append(
-                {
-                    "id": f"tool_{uuid.uuid4().hex[:8]}",
-                    "name": name,
-                    "args": _sanitize_args(args),
-                    "result_summary": result.summary,
-                    "duration_ms": result.duration_ms,
-                }
-            )
-
-        synthesized = synthesize(intent, question, results)
-        return {
-            "intent": intent,
-            "plan": plan_steps,
-            "tool_calls": executed,
-            "response": synthesized,
-        }
-
-
-def _sanitize_args(args: dict[str, Any]) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    for k, v in args.items():
-        if isinstance(v, (str, int, float, bool)) or v is None:
-            out[k] = v
-        else:
-            out[k] = str(v)
-    return out
+    synthesized = synthesize(intent, question, results)
+    return {
+        "intent": intent,
+        "plan": plan_steps,
+        "tool_calls": executed,
+        "response": synthesized,
+        "source": "rules",
+        "usage": {
+            "model": "rule-based-fallback",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "estimated_cost_usd": 0.0,
+        },
+    }
 
 
 def run_orchestrator(db: Session, tenant_id: uuid.UUID, question: str) -> dict[str, Any]:
-    orch = Orchestrator(db=db, tenant_id=tenant_id)
-    result = orch.run(question)
+    tenant = db.get(Tenant, tenant_id)
+    if tenant is None:
+        raise ValueError("Tenant not found")
+
+    config = _resolve_llm_config(tenant)
+    llm_error: str | None = None
+
+    if config is not None:
+        try:
+            result = run_with_llm(db, tenant, question, config)
+            persist_agent_run(db, tenant_id, question, result)
+            return result
+        except LLMError as exc:
+            llm_error = str(exc)
+            logger.warning("LLM orchestrator failed, falling back to rules: %s", exc)
+        except Exception as exc:
+            llm_error = f"{type(exc).__name__}: {exc}"
+            logger.exception("Unexpected LLM failure: %s", exc)
+
+    result = run_with_rules(db, tenant, question)
+    if llm_error:
+        result["llm_error"] = llm_error
     persist_agent_run(db, tenant_id, question, result)
     return result
