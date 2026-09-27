@@ -10,6 +10,15 @@ class CloudProviderAdapter(Protocol):
 
     def validate_connection(self, db: Session, cloud_account_id: uuid.UUID) -> tuple[bool, str]: ...
 
+    def execute_action(
+        self,
+        db: Session,
+        cloud_account_id: uuid.UUID,
+        resource_cloud_id: str,
+        action: str,
+        params: dict,
+    ) -> dict: ...
+
     def get_resources(self, db: Session, cloud_account_id: uuid.UUID) -> list[dict[str, Any]]: ...
 
     def get_costs(
