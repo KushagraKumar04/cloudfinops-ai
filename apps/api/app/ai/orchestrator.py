@@ -183,8 +183,81 @@ def _build_provider(config: dict[str, Any]) -> LLMProvider:
     return provider
 
 
+ANSWER_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "answer": {
+            "type": "string",
+            "description": "2-5 sentence direct response to the user's question.",
+        },
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "severity": {"type": "string", "enum": ["info", "warning", "critical"]},
+                    "title": {"type": "string"},
+                    "detail": {"type": "string"},
+                },
+                "required": ["severity", "title", "detail"],
+            },
+        },
+        "evidence": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string"},
+                    "value": {"type": "string"},
+                    "source": {"type": "string"},
+                },
+                "required": ["label", "value", "source"],
+            },
+        },
+        "recommendations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "estimatedMonthlySavings": {"type": "number"},
+                    "risk": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH", "BLOCKED"]},
+                },
+                "required": ["id", "title", "estimatedMonthlySavings", "risk"],
+            },
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "requires_human_review": {"type": "boolean"},
+        "followUps": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+    },
+    "required": [
+        "answer",
+        "findings",
+        "evidence",
+        "recommendations",
+        "confidence",
+        "requires_human_review",
+    ],
+}
+
+
 def _tool_specs_list() -> list[ToolSpec]:
     return [ToolSpec(name=s["name"], description=s["description"], parameters=s["parameters"]) for s in tool_specs()]
+
+
+def _submit_answer_spec() -> ToolSpec:
+    return ToolSpec(
+        name="submit_answer",
+        description=(
+            "Submit the final structured answer to the user's question. "
+            "Call this exactly once when you have gathered enough evidence and are ready to answer."
+        ),
+        parameters=ANSWER_TOOL_SCHEMA,
+    )
 
 
 def _parse_answer(raw: str | None) -> LLMAnswer:
@@ -205,6 +278,13 @@ def _parse_answer(raw: str | None) -> LLMAnswer:
         raise LLMError(f"LLM output failed validation: {exc}") from exc
 
 
+def _parse_answer_from_dict(payload: dict[str, Any]) -> LLMAnswer:
+    try:
+        return LLMAnswer.model_validate(payload)
+    except ValidationError as exc:
+        raise LLMError(f"submit_answer payload failed validation: {exc}") from exc
+
+
 def _summarize_tool_result(result: ToolResult) -> str:
     payload = {"summary": result.summary, "data": result.data}
     text = json.dumps(payload, default=str)
@@ -218,16 +298,21 @@ def run_with_llm(
     tenant: Tenant,
     question: str,
     config: dict[str, Any],
+    history: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     provider = _build_provider(config)
     ctx = ToolContext(db=db, tenant_id=tenant.id)
     specs = _tool_specs_list()
     catalog = {s.name: s for s in specs}
 
-    messages: list[Message] = [
-        Message(role="system", content=SYSTEM_PROMPT),
-        Message(role="user", content=question),
-    ]
+    messages: list[Message] = [Message(role="system", content=SYSTEM_PROMPT)]
+    if history:
+        for turn in history[-6:]:
+            role = turn.get("role")
+            content = turn.get("content")
+            if role in {"user", "assistant"} and content:
+                messages.append(Message(role=role, content=content))
+    messages.append(Message(role="user", content=question))
 
     executed_tools: list[dict[str, Any]] = []
     plan_steps: list[str] = []
@@ -242,25 +327,49 @@ def run_with_llm(
                 Message(
                     role="system",
                     content=(
-                        "You now have enough evidence. Produce the final answer as a single "
-                        "JSON object in the assistant message content. Do not call any tools."
+                        "You now have enough evidence. Call the `submit_answer` tool with the "
+                        "final structured response. Do not call any other tool."
                     ),
                 )
             )
-        response = provider.chat(
-            messages=messages,
-            tools=specs,
-            model=config["model"],
-            temperature=config["temperature"],
-            max_tokens=config["max_tokens"],
-            force_json=False,
-            tool_choice="none" if is_last else None,
-        )
+            response = provider.chat(
+                messages=messages,
+                tools=[_submit_answer_spec()],
+                model=config["model"],
+                temperature=config["temperature"],
+                max_tokens=config["max_tokens"],
+                force_json=False,
+                tool_choice="required",
+            )
+        else:
+            response = provider.chat(
+                messages=messages,
+                tools=specs,
+                model=config["model"],
+                temperature=config["temperature"],
+                max_tokens=config["max_tokens"],
+                force_json=False,
+            )
         total_input += response.input_tokens
         total_output += response.output_tokens
         last_model = response.model
 
         if response.tool_calls:
+            if is_last:
+                submit = next((tc for tc in response.tool_calls if tc.name == "submit_answer"), None)
+                if submit is not None:
+                    parsed = _parse_answer_from_dict(submit.args)
+                    return _finalize_llm(
+                        db=db,
+                        tenant_id=tenant.id,
+                        parsed=parsed,
+                        executed_tools=executed_tools,
+                        plan_steps=plan_steps or ["Answer using retrieved context"],
+                        total_input=total_input,
+                        total_output=total_output,
+                        model=last_model,
+                    )
+
             messages.append(
                 Message(
                     role="assistant",
@@ -269,6 +378,8 @@ def run_with_llm(
                 )
             )
             for tc in response.tool_calls:
+                if tc.name == "submit_answer":
+                    continue
                 if tc.name not in catalog:
                     result = ToolResult(summary=f"Unknown tool: {tc.name}")
                 else:
@@ -674,7 +785,12 @@ def run_with_rules(db: Session, tenant: Tenant, question: str) -> dict[str, Any]
     }
 
 
-def run_orchestrator(db: Session, tenant_id: uuid.UUID, question: str) -> dict[str, Any]:
+def run_orchestrator(
+    db: Session,
+    tenant_id: uuid.UUID,
+    question: str,
+    history: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
     tenant = db.get(Tenant, tenant_id)
     if tenant is None:
         raise ValueError("Tenant not found")
@@ -684,7 +800,7 @@ def run_orchestrator(db: Session, tenant_id: uuid.UUID, question: str) -> dict[s
 
     if config is not None:
         try:
-            result = run_with_llm(db, tenant, question, config)
+            result = run_with_llm(db, tenant, question, config, history=history)
             persist_agent_run(db, tenant_id, question, result)
             return result
         except LLMError as exc:
