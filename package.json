@@ -12,7 +12,15 @@
     "build": "npm run build --workspace=apps/web",
     "preview": "npm run preview --workspace=apps/web",
     "lint": "npm run lint --workspace=apps/web",
-    "typecheck": "npm run typecheck --workspace=apps/web"
+    "typecheck": "npm run typecheck --workspace=apps/web",
+    "api:up": "docker compose up -d postgres redis",
+    "api:down": "docker compose down",
+    "api:logs": "docker compose logs -f api postgres",
+    "api:migrate": "docker compose exec api alembic upgrade head",
+    "api:revision": "docker compose exec api alembic revision --autogenerate -m",
+    "api:test": "docker compose exec api pytest -q",
+    "api:seed": "docker compose exec api python -m app.cli.seed",
+    "api:reset": "docker compose exec api alembic downgrade base && docker compose exec api alembic upgrade head && docker compose exec api python -m app.cli.seed"
   },
   "engines": {
     "node": ">=20"
