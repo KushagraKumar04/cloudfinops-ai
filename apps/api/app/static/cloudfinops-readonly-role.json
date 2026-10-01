@@ -1,0 +1,38 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "CloudFinOps AI read-only cross-account role",
+  "Parameters": {
+    "RoleName": {
+      "Type": "String",
+      "Default": "CloudFinOpsReadOnly",
+      "Description": "IAM role name"
+    }
+  },
+  "Resources": {
+    "CloudFinOpsRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": { "Ref": "RoleName" },
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": { "AWS": "arn:aws:iam::000000000000:root" },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "ManagedPolicyArns": [
+          "arn:aws:iam::aws:policy/ReadOnlyAccess",
+          "arn:aws:iam::aws:policy/AWSBillingReadOnlyAccess"
+        ],
+        "MaxSessionDuration": 3600,
+        "Description": "Read-only access for CloudFinOps AI"
+      }
+    }
+  },
+  "Outputs": {
+    "RoleArn": { "Value": { "Fn::GetAtt": ["CloudFinOpsRole", "Arn"] } }
+  }
+}
