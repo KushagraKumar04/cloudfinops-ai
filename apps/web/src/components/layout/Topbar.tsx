@@ -1,4 +1,5 @@
 import { Search, Bell } from 'lucide-react'
+import { USE_MOCKS } from '@/lib/api/client'
 
 export function Topbar() {
   return (
@@ -18,9 +19,11 @@ export function Topbar() {
         </div>
       </div>
       <div className="flex items-center gap-3">
-        <span className="hidden sm:inline-flex items-center gap-1.5 rounded-sm border border-warning-soft bg-warning-soft px-2 py-0.5 text-[11px] font-medium text-warning">
-          Demo data
-        </span>
+        {USE_MOCKS ? (
+          <span className="hidden sm:inline-flex items-center gap-1.5 rounded-sm border border-warning-soft bg-warning-soft px-2 py-0.5 text-[11px] font-medium text-warning">
+            Demo data
+          </span>
+        ) : null} 
         <button className="rounded p-1.5 text-ink-muted hover:text-ink hover:bg-surface-muted" aria-label="Notifications">
           <Bell size={16} />
         </button>
