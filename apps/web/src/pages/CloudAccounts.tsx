@@ -7,11 +7,14 @@ import { StateBlock } from '@/components/ui/StateBlock'
 import { CloudAccountCard } from '@/features/cloudAccounts/CloudAccountCard'
 import { ConnectWizard } from '@/features/cloudAccounts/ConnectWizard'
 import { useCloudAccounts, useDeleteCloudAccount } from '@/features/cloudAccounts/hooks'
+import { useAuth } from '@/features/auth/useAuth'
 
 export function CloudAccounts() {
   const { data, isLoading, isError, refetch } = useCloudAccounts()
   const [connectOpen, setConnectOpen] = useState(false)
   const remove = useDeleteCloudAccount()
+  const { can } = useAuth()
+  const canManage = can('manage_cloud_accounts')
 
   const onDelete = (id: string, name: string) => {
     if (!window.confirm(`Disconnect ${name}? This removes the connection and stops syncing. It does not delete any cloud resources.`)) return
@@ -24,9 +27,11 @@ export function CloudAccounts() {
         title="Cloud Accounts"
         description="Connected AWS accounts and Azure subscriptions. Connections are read-only by default."
         action={
-          <Button variant="primary" size="md" onClick={() => setConnectOpen(true)}>
-            <Plus size={14} /> Connect account
-          </Button>
+          canManage ? (
+            <Button variant="primary" size="md" onClick={() => setConnectOpen(true)}>
+              <Plus size={14} /> Connect account
+            </Button>
+          ) : null
         }
       />
 
@@ -55,14 +60,22 @@ export function CloudAccounts() {
               title="No accounts connected"
               description="Connect an AWS account or Azure subscription to begin ingesting cost and inventory data."
               action={
-                <Button variant="primary" onClick={() => setConnectOpen(true)}>
-                  <Plus size={14} /> Connect account
-                </Button>
+                canManage ? (
+                  <Button variant="primary" onClick={() => setConnectOpen(true)}>
+                    <Plus size={14} /> Connect account
+                  </Button>
+                ) : null
               }
             />
           </div>
         ) : (
-          data.map((a) => <CloudAccountCard key={a.id} account={a} onDelete={onDelete} />)
+          data.map((a) => (
+            <CloudAccountCard
+              key={a.id}
+              account={a}
+              onDelete={canManage ? onDelete : undefined}
+            />
+          ))
         )}
       </section>
 
