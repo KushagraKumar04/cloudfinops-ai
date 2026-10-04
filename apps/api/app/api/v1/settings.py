@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_tenant
+from app.api.deps import get_current_tenant, require_permission
+from app.services.permissions import Permission
 from app.config import get_settings
 from app.db.session import get_db
 from app.models.tenant import Tenant
@@ -52,7 +53,11 @@ def get_settings(
     return _read(tenant)
 
 
-@router.put("/policies", response_model=list[PolicyRule])
+@router.put(
+    "/policies",
+    response_model=list[PolicyRule],
+    dependencies=[Depends(require_permission(Permission.EDIT_SETTINGS))],
+)
 def update_policies(
     payload: PoliciesIn,
     db: Session = Depends(get_db),
@@ -65,7 +70,11 @@ def update_policies(
     return payload.policies
 
 
-@router.put("/thresholds", response_model=list[ThresholdRule])
+@router.put(
+    "/thresholds",
+    response_model=list[ThresholdRule],
+    dependencies=[Depends(require_permission(Permission.EDIT_SETTINGS))],
+)
 def update_thresholds(
     payload: ThresholdsIn,
     db: Session = Depends(get_db),
@@ -78,7 +87,11 @@ def update_thresholds(
     return payload.thresholds
 
 
-@router.put("/llm", response_model=LlmConfig)
+@router.put(
+    "/llm",
+    response_model=LlmConfig,
+    dependencies=[Depends(require_permission(Permission.EDIT_SETTINGS))],
+)
 def update_llm(
     payload: LlmIn,
     db: Session = Depends(get_db),
