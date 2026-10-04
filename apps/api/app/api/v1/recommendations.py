@@ -5,7 +5,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.api.deps import get_current_tenant
+from app.api.deps import get_current_tenant, require_permission
+from app.services.permissions import Permission
 from app.services.notifications import dispatch_event
 from app.db.session import get_db
 from app.models.audit import AuditEvent
@@ -244,7 +245,11 @@ def _decide(
     return _to_out(rec, resource, account)
 
 
-@router.post("/{recommendation_id}/approve", response_model=RecommendationOut)
+@router.post(
+    "/{recommendation_id}/approve",
+    response_model=RecommendationOut,
+    dependencies=[Depends(require_permission(Permission.APPROVE_RECOMMENDATION))],
+)
 def approve_recommendation(
     recommendation_id: uuid.UUID,
     payload: DecisionIn,
@@ -254,7 +259,11 @@ def approve_recommendation(
     return _decide(db, tenant, recommendation_id, "approve", payload.reason)
 
 
-@router.post("/{recommendation_id}/reject", response_model=RecommendationOut)
+@router.post(
+    "/{recommendation_id}/reject",
+    response_model=RecommendationOut,
+    dependencies=[Depends(require_permission(Permission.APPROVE_RECOMMENDATION))],
+)
 def reject_recommendation(
     recommendation_id: uuid.UUID,
     payload: DecisionIn,
@@ -266,7 +275,11 @@ def reject_recommendation(
     return _decide(db, tenant, recommendation_id, "reject", payload.reason)
 
 
-@router.post("/{recommendation_id}/defer", response_model=RecommendationOut)
+@router.post(
+    "/{recommendation_id}/defer",
+    response_model=RecommendationOut,
+    dependencies=[Depends(require_permission(Permission.APPROVE_RECOMMENDATION))],
+)
 def defer_recommendation(
     recommendation_id: uuid.UUID,
     payload: DecisionIn,
