@@ -6,6 +6,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import get_current_tenant
+from app.services.notifications import dispatch_event
 from app.db.session import get_db
 from app.models.audit import AuditEvent
 from app.models.cloud_account import CloudAccount
@@ -225,6 +226,18 @@ def _decide(
     )
     db.commit()
     db.refresh(rec)
+
+    if decision == "approve" and rec.risk == "HIGH":
+        dispatch_event(
+            db,
+            tenant.id,
+            "recommendation.high_risk",
+            "warning",
+            f"High-risk recommendation approved: {rec.title}",
+            f"Approver: demo.user@acme.io\nRecommendation: {rec.id}\nRisk: {rec.risk}\n"
+            f"Estimated savings: ${float(rec.estimated_monthly_savings):,.2f}/mo",
+            {"recommendation_id": str(rec.id), "risk": rec.risk},
+        )
 
     resource = db.get(Resource, rec.resource_id)
     account = db.get(CloudAccount, resource.cloud_account_id) if resource else None
