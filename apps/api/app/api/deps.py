@@ -7,6 +7,7 @@ from app.db.session import get_db
 from app.models.tenant import Tenant
 from app.models.user import TeamMember, User
 from app.services.auth import AuthError, decode_token
+from app.services.permissions import Permission, has_permission
 
 
 def _get_or_create_demo_tenant(db: Session) -> Tenant:
@@ -83,9 +84,28 @@ def get_current_user(
     return user
 
 
+def get_current_membership(
+    db: Session = Depends(get_db),
+    user: User | None = Depends(get_current_user_optional),
+) -> TeamMember | None:
+    settings = get_settings()
+    if settings.auth_disabled:
+        return None
+    if user is None:
+        return None
+    stmt = (
+        select(TeamMember)
+        .where(TeamMember.user_id == user.id)
+        .order_by(TeamMember.created_at.asc())
+        .limit(1)
+    )
+    return db.execute(stmt).scalar_one_or_none()
+
+
 def get_current_tenant(
     db: Session = Depends(get_db),
     user: User | None = Depends(get_current_user_optional),
+    membership: TeamMember | None = Depends(get_current_membership),
 ) -> Tenant:
     settings = get_settings()
     if settings.auth_disabled:
@@ -98,16 +118,31 @@ def get_current_tenant(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    stmt = (
-        select(TeamMember)
-        .where(TeamMember.user_id == user.id)
-        .order_by(TeamMember.created_at.asc())
-        .limit(1)
-    )
-    membership = db.execute(stmt).scalar_one_or_none()
     if membership is None:
         raise HTTPException(status_code=403, detail="No tenant associated with this user")
     tenant = db.get(Tenant, membership.tenant_id)
     if tenant is None:
         raise HTTPException(status_code=403, detail="Tenant not found")
     return tenant
+
+
+def get_current_role(
+    membership: TeamMember | None = Depends(get_current_membership),
+) -> str:
+    settings = get_settings()
+    if settings.auth_disabled:
+        return "owner"
+    if membership is None:
+        raise HTTPException(status_code=403, detail="No tenant association")
+    return membership.role
+
+
+def require_permission(permission: Permission):
+    def check(role: str = Depends(get_current_role)) -> None:
+        if not has_permission(role, permission):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Requires {permission.value} permission",
+            )
+
+    return check
