@@ -4,7 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_tenant
+from app.api.deps import get_current_tenant, require_permission
+from app.services.permissions import Permission
 from app.config import get_settings
 from app.db.session import get_db
 from app.models.cloud_account import CloudAccount
@@ -43,7 +44,11 @@ def list_cloud_accounts(
     return list(db.execute(stmt).scalars().all())
 
 
-@router.post("/aws", response_model=AwsConnectOut)
+@router.post(
+    "/aws",
+    response_model=AwsConnectOut,
+    dependencies=[Depends(require_permission(Permission.MANAGE_CLOUD_ACCOUNTS))],
+)
 def connect_aws(
     payload: AwsConnectIn,
     db: Session = Depends(get_db),
@@ -81,7 +86,11 @@ def connect_aws(
     )
 
 
-@router.post("/azure", response_model=AzureConnectOut)
+@router.post(
+    "/azure",
+    response_model=AzureConnectOut,
+    dependencies=[Depends(require_permission(Permission.MANAGE_CLOUD_ACCOUNTS))],
+)
 def connect_azure(
     payload: AzureConnectIn,
     db: Session = Depends(get_db),
@@ -110,7 +119,11 @@ def connect_azure(
     )
 
 
-@router.post("/{account_id}/verify", response_model=VerifyOut)
+@router.post(
+    "/{account_id}/verify",
+    response_model=VerifyOut,
+    dependencies=[Depends(require_permission(Permission.MANAGE_CLOUD_ACCOUNTS))],
+)
 def verify(
     account_id: uuid.UUID,
     db: Session = Depends(get_db),
@@ -123,7 +136,11 @@ def verify(
     return VerifyOut(ok=ok, message=message, account_id=str(account.id))
 
 
-@router.post("/{account_id}/sync", response_model=SyncResponse)
+@router.post(
+    "/{account_id}/sync",
+    response_model=SyncResponse,
+    dependencies=[Depends(require_permission(Permission.SYNC_CLOUD_ACCOUNTS))],
+)
 def sync_cloud_account(
     account_id: uuid.UUID,
     db: Session = Depends(get_db),
@@ -144,7 +161,11 @@ def sync_cloud_account(
     return SyncResponse(id=account.id, status="started")
 
 
-@router.post("/{account_id}/validate", response_model=ValidateResponse)
+@router.post(
+    "/{account_id}/validate",
+    response_model=ValidateResponse,
+    dependencies=[Depends(require_permission(Permission.MANAGE_CLOUD_ACCOUNTS))],
+)
 def validate_cloud_account(
     account_id: uuid.UUID,
     db: Session = Depends(get_db),
@@ -157,7 +178,11 @@ def validate_cloud_account(
     return ValidateResponse(id=account.id, ok=ok, message=message)
 
 
-@router.delete("/{account_id}", status_code=204)
+@router.delete(
+    "/{account_id}",
+    status_code=204,
+    dependencies=[Depends(require_permission(Permission.MANAGE_CLOUD_ACCOUNTS))],
+)
 def delete_cloud_account(
     account_id: uuid.UUID,
     db: Session = Depends(get_db),
