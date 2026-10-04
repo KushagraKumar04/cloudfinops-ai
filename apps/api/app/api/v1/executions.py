@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_tenant
+from app.services.notifications import dispatch_event
 from app.db.session import get_db
 from app.models.execution import Execution
 from app.models.tenant import Tenant
@@ -55,6 +56,20 @@ def create(
         execution = create_execution(db, tenant, payload.recommendation_id, payload.mode)
     except ExecutionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    if execution.status == "blocked":
+        reasons = execution.policy_result.get("reasons", []) if execution.policy_result else []
+        dispatch_event(
+            db,
+            tenant.id,
+            "policy.blocked",
+            "warning",
+            f"Execution blocked: {execution.action}",
+            f"Recommendation {execution.recommendation_id} was blocked by policy.\n\n"
+            + "\n".join(f"- {r}" for r in reasons),
+            {"execution_id": str(execution.id), "action": execution.action},
+        )
+
     return ExecutionOut.model_validate(execution)
 
 
