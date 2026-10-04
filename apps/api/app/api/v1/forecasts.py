@@ -7,13 +7,21 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_tenant
 from app.db.session import get_db
 from app.models.budget import Budget
-from app.models.cost import CostRecord
 from app.models.tenant import Tenant
 from app.schemas.forecast import (
     ForecastPoint,
     ForecastScenarioOut,
     ForecastSummaryOut,
     ServiceForecastOut,
+)
+from app.services.forecasting import (
+    DailySeries,
+    ForecastError,
+    fit_forecast,
+    list_services,
+    load_daily_series,
+    trend_direction,
+    trend_pct,
 )
 
 router = APIRouter(prefix="/forecasts", tags=["forecasts"])
@@ -31,61 +39,87 @@ def _resolve_budget(db: Session, tenant: Tenant) -> float:
     return float(budget.amount)
 
 
-def _load_daily_totals(db: Session, tenant: Tenant, provider: str | None) -> dict[date, float]:
-    stmt = select(CostRecord).where(CostRecord.tenant_id == tenant.id)
-    if provider and provider != "all":
-        stmt = stmt.where(CostRecord.provider == provider)
-    rows = list(db.execute(stmt).scalars().all())
-    daily: dict[date, float] = {}
-    for r in rows:
-        daily[r.date] = daily.get(r.date, 0) + float(r.cost)
-    return daily
-
-
-def _build_series(daily: dict[date, float], horizon_days: int) -> list[ForecastPoint]:
-    today = date.today()
-    dates = sorted(daily.keys())
-    if not dates:
+def _build_points(series: DailySeries, horizon: int) -> list[ForecastPoint]:
+    if not series.values:
+        return []
+    try:
+        result = fit_forecast(series, horizon)
+    except ForecastError:
         return []
 
-    hist_start = dates[0]
-    hist_end = dates[-1]
-    hist_days = (hist_end - hist_start).days + 1
-
-    total_recent = sum(daily.get(hist_start + timedelta(days=i), 0) for i in range(hist_days))
-    trend = 0.0035
-
-    window = min(hist_days, 14)
-    recent_values = [daily.get(hist_end - timedelta(days=i), 0) for i in range(window)]
-    recent_values = [v for v in recent_values if v > 0]
-    baseline = (sum(recent_values) / len(recent_values)) if recent_values else (total_recent / max(1, hist_days))
-
-    forecast_values: list[float] = []
-    for i in range(horizon_days):
-        trend_factor = (1 + trend) ** (i + 1)
-        dow = i % 7
-        weekend = 0.82 if dow >= 5 else 1.0
-        forecast_values.append(baseline * trend_factor * weekend)
-
     points: list[ForecastPoint] = []
-    for i in range(hist_days):
-        d = hist_start + timedelta(days=i)
-        actual = daily.get(d, 0)
-        points.append(ForecastPoint(date=d, actual=round(actual, 2), forecast=None, lower=None, upper=None))
+    for d, v in zip(series.dates, series.values):
+        points.append(
+            ForecastPoint(date=d, actual=round(float(v), 2), forecast=None, lower=None, upper=None)
+        )
 
-    for i, v in enumerate(forecast_values):
-        d = hist_end + timedelta(days=i + 1)
-        widening = 0.03 + (i / horizon_days) * 0.06
+    last_date = series.dates[-1]
+    for i, value in enumerate(result.forecast):
         points.append(
             ForecastPoint(
-                date=d,
+                date=last_date + timedelta(days=i + 1),
                 actual=None,
-                forecast=round(v, 2),
-                lower=round(v * (1 - widening), 2),
-                upper=round(v * (1 + widening), 2),
+                forecast=round(value, 2),
+                lower=round(result.lower[i], 2),
+                upper=round(result.upper[i], 2),
             )
         )
     return points
+
+
+def _summarize(
+    series: DailySeries,
+    horizon: int,
+    budget: float,
+) -> tuple[float, float, float, float, float, str, float, float]:
+    try:
+        result = fit_forecast(series, horizon)
+    except ForecastError:
+        return 0.0, 0.0, 0.0, 0.0, 0.0, "flat", 0.0, 0.0
+
+    today = date.today()
+    actual_mtd = sum(v for d, v in zip(series.dates, series.values) if d.month == today.month and d.year == today.year)
+    end_of_month = (today.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    days_remaining = max(1, (end_of_month - today).days)
+
+    forecast_remaining = sum(result.forecast[:days_remaining])
+    lower_remaining = sum(result.lower[:days_remaining])
+    upper_remaining = sum(result.upper[:days_remaining])
+
+    projection = actual_mtd + forecast_remaining
+    lower = actual_mtd + lower_remaining
+    upper = actual_mtd + upper_remaining
+
+    pct = trend_pct(result, horizon)
+    direction = trend_direction(pct)
+
+    if budget <= 0:
+        breach = 0.0
+    elif upper <= budget:
+        breach = 0.02
+    elif lower >= budget:
+        breach = 0.95
+    else:
+        span = max(1.0, upper - lower)
+        breach = 0.4 + (upper - budget) / span * 0.5
+
+    if result.method == "flat-zero":
+        confidence = 0.5
+    elif result.seasonal_periods:
+        confidence = 0.88
+    else:
+        confidence = 0.74
+
+    return (
+        round(projection, 2),
+        round(lower, 2),
+        round(upper, 2),
+        round(breach, 3),
+        confidence,
+        direction,
+        pct,
+        round(actual_mtd, 2),
+    )
 
 
 @router.get("/summary", response_model=ForecastSummaryOut)
@@ -96,55 +130,25 @@ def forecast_summary(
     horizon: str = Query(default="30d"),
     budget: float | None = Query(default=None),
 ) -> ForecastSummaryOut:
-    daily = _load_daily_totals(db, tenant, provider)
-    horizon_days = _horizon_days(horizon)
-    points = _build_series(daily, horizon_days)
+    series = load_daily_series(db, tenant.id, provider=provider)
     budget_amount = budget if budget is not None else _resolve_budget(db, tenant)
+    horizon_days = _horizon_days(horizon)
 
-    today = date.today()
-    actual_mtd = sum(v for d, v in daily.items() if d.month == today.month and d.year == today.year)
-
-    end_of_month = (today.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
-    days_remaining = max(1, (end_of_month - today).days)
-
-    horizon_forecast = [p for p in points if p.forecast is not None][:days_remaining]
-    forecast_remaining = sum(p.forecast or 0 for p in horizon_forecast)
-    lower_remaining = sum(p.lower or 0 for p in horizon_forecast)
-    upper_remaining = sum(p.upper or 0 for p in horizon_forecast)
-
-    month_end_projection = actual_mtd + forecast_remaining
-    month_end_lower = actual_mtd + lower_remaining
-    month_end_upper = actual_mtd + upper_remaining
-
-    forecast_points = [p for p in points if p.forecast is not None]
-    if forecast_points:
-        first = forecast_points[0].forecast or 0
-        last = forecast_points[-1].forecast or 0
-        trend_pct = ((last - first) / first * 100) if first > 0 else 0
-    else:
-        trend_pct = 0
-
-    trend_direction = "up" if trend_pct > 1 else "down" if trend_pct < -1 else "flat"
-    budget_utilization = (month_end_projection / budget_amount * 100) if budget_amount > 0 else 0
-
-    if month_end_upper <= budget_amount:
-        breach_probability = 0.02
-    elif month_end_lower >= budget_amount:
-        breach_probability = 0.95
-    else:
-        span = max(1.0, month_end_upper - month_end_lower)
-        breach_probability = 0.4 + (month_end_upper - budget_amount) / span * 0.5
+    projection, lower, upper, breach, confidence, direction, pct, _mtd = _summarize(
+        series, horizon_days, budget_amount
+    )
+    utilization = (projection / budget_amount * 100) if budget_amount > 0 else 0.0
 
     return ForecastSummaryOut(
-        month_end_projection=round(month_end_projection, 2),
-        month_end_lower=round(month_end_lower, 2),
-        month_end_upper=round(month_end_upper, 2),
+        month_end_projection=projection,
+        month_end_lower=lower,
+        month_end_upper=upper,
         budget=round(budget_amount, 2),
-        budget_utilization=round(budget_utilization, 2),
-        breach_probability=round(breach_probability, 3),
-        trend_direction=trend_direction,
-        trend_pct=round(trend_pct, 2),
-        confidence=0.82,
+        budget_utilization=round(utilization, 2),
+        breach_probability=breach,
+        trend_direction=direction,
+        trend_pct=pct,
+        confidence=confidence,
         currency="USD",
         horizon=horizon,
         as_of=datetime.utcnow(),
@@ -158,8 +162,8 @@ def forecast_series(
     provider: str | None = Query(default=None),
     horizon: str = Query(default="30d"),
 ) -> list[ForecastPoint]:
-    daily = _load_daily_totals(db, tenant, provider)
-    return _build_series(daily, _horizon_days(horizon))
+    series = load_daily_series(db, tenant.id, provider=provider)
+    return _build_points(series, _horizon_days(horizon))
 
 
 @router.get("/by-service", response_model=list[ServiceForecastOut])
@@ -170,39 +174,37 @@ def forecast_by_service(
     horizon: str = Query(default="30d"),
 ) -> list[ServiceForecastOut]:
     horizon_days = _horizon_days(horizon)
-    stmt = select(CostRecord).where(CostRecord.tenant_id == tenant.id)
-    if provider and provider != "all":
-        stmt = stmt.where(CostRecord.provider == provider)
-    rows = list(db.execute(stmt).scalars().all())
-
-    today = date.today()
-    window_start = today - timedelta(days=30)
-    by_service: dict[str, dict[str, object]] = {}
-    for r in rows:
-        if r.date < window_start:
-            continue
-        entry = by_service.setdefault(r.service, {"provider": r.provider, "current": 0.0})
-        entry["current"] = float(entry["current"]) + float(r.cost)
+    services = list_services(db, tenant.id, provider=provider)
+    if not services:
+        return []
 
     out: list[ServiceForecastOut] = []
-    total_projected = 0.0
-    for name, entry in by_service.items():
-        current = float(entry["current"])
-        projected = current * (1 + 0.0035 * horizon_days)
+    for service_name, service_provider in services:
+        series = load_daily_series(db, tenant.id, provider=provider, service=service_name)
+        if not series.values:
+            continue
+        current = round(float(sum(series.values[-30:])), 2)
+        try:
+            result = fit_forecast(series, horizon_days)
+            projected = round(float(sum(result.forecast)), 2)
+        except ForecastError:
+            projected = round(current, 2)
+        change_pct = ((projected - current) / current * 100) if current > 0 else 0.0
         out.append(
             ServiceForecastOut(
-                name=name,
-                provider=str(entry["provider"]),
-                current=round(current, 2),
-                projected=round(projected, 2),
-                change_pct=round(((projected - current) / current * 100) if current > 0 else 0, 2),
-                share=0,
+                name=service_name,
+                provider=service_provider,
+                current=current,
+                projected=projected,
+                change_pct=round(change_pct, 2),
+                share=0.0,
             )
         )
-        total_projected += projected
 
-    for s in out:
-        s.share = round(s.projected / total_projected, 4) if total_projected > 0 else 0
+    total_projected = sum(s.projected for s in out)
+    if total_projected > 0:
+        for s in out:
+            s.share = round(s.projected / total_projected, 4)
 
     out.sort(key=lambda s: s.projected, reverse=True)
     return out
@@ -268,7 +270,7 @@ def forecast_scenarios(
                 monthly_delta=float(r["monthly_delta"]),
                 new_projection=round(new_projection, 2),
                 budget_status=status,
-                actions=list(r["actions"]),  # type: ignore[arg-type]
+                actions=list(r["actions"]),
             )
         )
     return out
