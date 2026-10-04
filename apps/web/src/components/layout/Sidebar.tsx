@@ -11,6 +11,9 @@ import {
   History,
   Cloud,
   Settings as SettingsIcon,
+  Boxes,
+  BadgeDollarSign,
+  Bell,
 } from 'lucide-react'
 
 const items = [
@@ -22,6 +25,9 @@ const items = [
   { to: '/forecast', label: 'Forecast', icon: TrendingUp },
   { to: '/approvals', label: 'Approvals', icon: CheckSquare },
   { to: '/audit', label: 'Audit', icon: History },
+  { to: '/kubernetes', label: 'Kubernetes', icon: Boxes },
+  { to: '/commitments', label: 'Commitments', icon: BadgeDollarSign },
+  { to: '/notifications', label: 'Notifications', icon: Bell },
   { to: '/cloud-accounts', label: 'Cloud Accounts', icon: Cloud },
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
 ]
