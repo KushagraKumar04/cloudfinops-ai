@@ -10,6 +10,7 @@ import { StateBlock } from '@/components/ui/StateBlock'
 import { formatCurrency, formatDateTime } from '@/lib/format'
 import { RiskBadge } from '@/features/recommendations/badges'
 import { useRecommendationDecision, useRecommendationList } from '@/features/recommendations/hooks'
+import { useAuth } from '@/features/auth/useAuth'
 import { parseRecommendationQuery } from '@/features/recommendations/queryParams'
 import type { Recommendation } from '@/features/recommendations/types'
 
@@ -23,6 +24,8 @@ export function Approvals() {
     pageSize: 20,
   }
   const { data, isLoading, isError, refetch } = useRecommendationList(query)
+  const { can } = useAuth()
+  const canApprove = can('approve_recommendation')
 
   const [approving, setApproving] = useState<Recommendation | null>(null)
   const [rejecting, setRejecting] = useState<Recommendation | null>(null)
@@ -141,12 +144,16 @@ export function Approvals() {
                     >
                       Review <ArrowRight size={12} />
                     </Link>
-                    <Button size="sm" variant="secondary" onClick={() => { setRejecting(r); setReason('') }}>
-                      Reject
-                    </Button>
-                    <Button size="sm" variant="primary" onClick={() => setApproving(r)}>
-                      Approve
-                    </Button>
+                    {canApprove ? (
+                      <>
+                        <Button size="sm" variant="secondary" onClick={() => { setRejecting(r); setReason('') }}>
+                          Reject
+                        </Button>
+                        <Button size="sm" variant="primary" onClick={() => setApproving(r)}>
+                          Approve
+                        </Button>
+                      </>
+                    ) : null}
                   </div>
                 </div>
               </CardBody>
