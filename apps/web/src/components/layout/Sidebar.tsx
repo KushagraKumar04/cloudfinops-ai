@@ -14,6 +14,7 @@ import {
   Boxes,
   BadgeDollarSign,
   Bell,
+  Users,
 } from 'lucide-react'
 
 const items = [
@@ -29,6 +30,7 @@ const items = [
   { to: '/commitments', label: 'Commitments', icon: BadgeDollarSign },
   { to: '/notifications', label: 'Notifications', icon: Bell },
   { to: '/cloud-accounts', label: 'Cloud Accounts', icon: Cloud },
+  { to: '/team', label: 'Team', icon: Users },
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
 ]
 

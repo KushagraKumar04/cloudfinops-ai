@@ -1,8 +1,9 @@
 import { useState } from 'react'
-import { Search, Bell, LogOut, User as UserIcon } from 'lucide-react'
+import { Search, LogOut, User as UserIcon } from 'lucide-react'
 import { USE_MOCKS } from '@/lib/api/client'
 import { useAuth } from '@/features/auth/useAuth'
 import { clsx } from 'clsx'
+import { NotificationBell } from './NotificationBell'
 
 export function Topbar() {
   const { user, tenant, logout } = useAuth()
@@ -37,9 +38,7 @@ export function Topbar() {
             Demo data
           </span>
         ) : null}
-        <button className="rounded p-1.5 text-ink-muted hover:text-ink hover:bg-surface-muted" aria-label="Notifications">
-          <Bell size={16} />
-        </button>
+        <NotificationBell />
         <div className="relative">
           <button
             onClick={() => setOpen((o) => !o)}

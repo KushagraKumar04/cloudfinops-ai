@@ -9,6 +9,7 @@ import { Toggle } from '@/components/ui/Toggle'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { StateBlock } from '@/components/ui/StateBlock'
 import { useSettings, useUpdateLlm, useUpdatePolicies, useUpdateThresholds } from '@/features/settings/hooks'
+import { useAuth } from '@/features/auth/useAuth'
 import type { LlmConfig, PolicyRule, ThresholdRule } from '@/features/settings/types'
 
 const PROVIDER_OPTIONS: SelectOption[] = [
@@ -19,6 +20,8 @@ const PROVIDER_OPTIONS: SelectOption[] = [
 
 export function Settings() {
   const { data, isLoading, isError, refetch } = useSettings()
+  const { can } = useAuth()
+  const canEdit = can('edit_settings')
 
   const [policies, setPolicies] = useState<PolicyRule[]>([])
   const [thresholds, setThresholds] = useState<ThresholdRule[]>([])
@@ -70,7 +73,11 @@ export function Settings() {
     <>
       <PageHeader
         title="Settings"
-        description="Policy, thresholds, and AI configuration. Changes apply to the FinOps engine on the next analysis run."
+        description={
+          canEdit
+            ? 'Policy, thresholds, and AI configuration. Changes apply to the FinOps engine on the next analysis run.'
+            : 'Read-only view. Your role does not allow editing settings.'
+        }
       />
 
       <section className="space-y-4">
@@ -79,7 +86,7 @@ export function Settings() {
             title="Policy engine"
             subtitle="Policies are code and configuration, not prompt text. They run after the LLM proposes an action."
             action={
-              policiesDirty ? (
+              canEdit && policiesDirty ? (
                 <div className="flex items-center gap-2">
                   <Button size="sm" variant="ghost" onClick={() => setPolicies(data.policies)}>Discard</Button>
                   <Button
@@ -151,7 +158,7 @@ export function Settings() {
             title="FinOps thresholds"
             subtitle="Values used by deterministic rules. Thresholds are configuration, not prompts."
             action={
-              thresholdsDirty ? (
+              canEdit && thresholdsDirty ? (
                 <div className="flex items-center gap-2">
                   <Button size="sm" variant="ghost" onClick={() => setThresholds(data.thresholds)}>Discard</Button>
                   <Button
@@ -205,7 +212,7 @@ export function Settings() {
             title="AI configuration"
             subtitle="Model routing, caching, and prompt versioning. The LLM is never the source of truth for billing."
             action={
-              llmDirty ? (
+              canEdit && llmDirty ? (
                 <div className="flex items-center gap-2">
                   <Button size="sm" variant="ghost" onClick={() => setLlm(data.llm)}>Discard</Button>
                   <Button
