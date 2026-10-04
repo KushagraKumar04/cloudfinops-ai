@@ -4,7 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_tenant
+from app.api.deps import get_current_tenant, require_permission
+from app.services.permissions import Permission
 from app.services.notifications import dispatch_event
 from app.db.session import get_db
 from app.models.execution import Execution
@@ -46,7 +47,12 @@ def get_execution(
     return ExecutionOut.model_validate(execution)
 
 
-@router.post("", response_model=ExecutionOut, status_code=201)
+@router.post(
+    "",
+    response_model=ExecutionOut,
+    status_code=201,
+    dependencies=[Depends(require_permission(Permission.EXECUTE))],
+)
 def create(
     payload: ExecutionCreateIn,
     db: Session = Depends(get_db),
@@ -73,7 +79,11 @@ def create(
     return ExecutionOut.model_validate(execution)
 
 
-@router.post("/{execution_id}/rollback", response_model=ExecutionOut)
+@router.post(
+    "/{execution_id}/rollback",
+    response_model=ExecutionOut,
+    dependencies=[Depends(require_permission(Permission.EXECUTE))],
+)
 def rollback(
     execution_id: uuid.UUID,
     db: Session = Depends(get_db),
