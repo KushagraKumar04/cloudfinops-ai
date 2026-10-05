@@ -11,6 +11,7 @@ from app.models.commitment import (
 )
 from app.models.cost import CostRecord
 from app.models.execution import Approval, Execution
+from app.models.invitation import Invitation, OAuthIdentity
 from app.models.kubernetes import (
     KubernetesCluster,
     KubernetesCostAllocation,
@@ -43,6 +44,8 @@ __all__ = [
     "RecommendationEvidence",
     "Approval",
     "Execution",
+    "Invitation",
+    "OAuthIdentity",
     "KubernetesCluster",
     "KubernetesNamespace",
     "KubernetesWorkload",
