@@ -16,6 +16,8 @@ import { Kubernetes } from './pages/Kubernetes'
 import { KubernetesCluster } from './pages/KubernetesCluster'
 import { Commitments } from './pages/Commitments'
 import { Team } from './pages/Team'
+import { AcceptInvite } from './pages/AcceptInvite'
+import { OAuthCallback } from './pages/OAuthCallback'
 import { Notifications } from './pages/Notifications'
 import { Settings } from './pages/Settings'
 import { Login } from './pages/Login'
@@ -31,6 +33,8 @@ export function AppRoutes() {
       <Route path="/register" element={<Register />} />
       <Route path="/terms" element={<Terms />} />
       <Route path="/privacy" element={<Privacy />} />
+      <Route path="/accept-invite" element={<AcceptInvite />} />
+      <Route path="/oauth/callback" element={<OAuthCallback />} />
 
       <Route element={<ProtectedRoute />}>
         <Route element={<AppShell />}>
