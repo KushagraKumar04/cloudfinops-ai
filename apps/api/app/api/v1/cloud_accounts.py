@@ -8,8 +8,10 @@ from app.api.deps import get_current_tenant, require_permission
 from app.services.permissions import Permission
 from app.config import get_settings
 from app.db.session import get_db
+from app.models.audit import AuditEvent
 from app.models.cloud_account import CloudAccount
 from app.models.tenant import Tenant
+from app.schemas.bulk import BulkAccountIdsIn, BulkActionResult
 from app.schemas.cloud_account import CloudAccountOut, SyncResponse, ValidateResponse
 from app.schemas.cloud_connection import (
     AwsConnectIn,
@@ -25,7 +27,7 @@ from app.services.cloud_connection import (
     verify_account,
 )
 
-from app.services.ingestion import IngestionService
+
 
 router = APIRouter(prefix="/cloud/accounts", tags=["cloud-accounts"])
 settings = get_settings()
@@ -132,6 +134,8 @@ def verify(
     account = db.get(CloudAccount, account_id)
     if account is None or account.tenant_id != tenant.id:
         raise HTTPException(status_code=404, detail="Cloud account not found")
+    if account.disabled_at is not None:
+        raise HTTPException(status_code=409, detail="Cloud account is disabled")
     ok, message = verify_account(db, account)
     return VerifyOut(ok=ok, message=message, account_id=str(account.id))
 
@@ -149,16 +153,22 @@ def sync_cloud_account(
     account = db.get(CloudAccount, account_id)
     if account is None or account.tenant_id != tenant.id:
         raise HTTPException(status_code=404, detail="Cloud account not found")
+    if account.disabled_at is not None:
+        raise HTTPException(status_code=409, detail="Cloud account is disabled")
     if not account.connection_verified and not settings.mock_adapters:
         raise HTTPException(status_code=409, detail="Verify the connection before syncing")
 
+    account_id_value = account.id
+    account_id_str = str(account_id_value)
     account.status = "syncing"
     db.commit()
 
-    service = IngestionService(db)
-    service.sync_account(account.id)
+    from app.workers import enqueue_task, sync_cloud_account_job
 
-    return SyncResponse(id=account.id, status="started")
+    enqueue_task(sync_cloud_account_job, account_id_str)
+
+    return SyncResponse(id=account_id_value, status="started")
+
 
 
 @router.post(
@@ -194,6 +204,75 @@ def delete_cloud_account(
     db.delete(account)
     db.commit()
     return None
+
+
+@router.post("/bulk-disable", response_model=BulkActionResult)
+def bulk_disable_accounts(
+    payload: BulkAccountIdsIn,
+    db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_current_tenant),
+) -> BulkActionResult:
+    return _bulk_set_disabled(db, tenant, payload.ids, disabled=True)
+
+
+@router.post("/bulk-enable", response_model=BulkActionResult)
+def bulk_enable_accounts(
+    payload: BulkAccountIdsIn,
+    db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_current_tenant),
+) -> BulkActionResult:
+    return _bulk_set_disabled(db, tenant, payload.ids, disabled=False)
+
+
+def _bulk_set_disabled(
+    db: Session,
+    tenant: Tenant,
+    ids: list[uuid.UUID],
+    disabled: bool,
+) -> BulkActionResult:
+    from datetime import UTC, datetime as _dt
+
+    result = BulkActionResult(total=len(ids))
+    stmt = select(CloudAccount).where(
+        CloudAccount.tenant_id == tenant.id,
+        CloudAccount.id.in_(ids),
+    )
+    found = {a.id: a for a in db.execute(stmt).scalars().all()}
+
+    for account_id in ids:
+        account = found.get(account_id)
+        if account is None:
+            result.failed.append({"id": str(account_id), "error": "Not found"})
+            continue
+        if disabled and account.disabled_at is not None:
+            result.failed.append({"id": str(account_id), "error": "Already disabled"})
+            continue
+        if not disabled and account.disabled_at is None:
+            result.failed.append({"id": str(account_id), "error": "Already enabled"})
+            continue
+
+        account.disabled_at = _dt.now(UTC) if disabled else None
+        account.status = "disabled" if disabled else "connected"
+        result.succeeded.append(account_id)
+
+        db.add(
+            AuditEvent(
+                tenant_id=tenant.id,
+                at=_dt.now(UTC),
+                category="cloud.account",
+                severity="info",
+                actor="demo.user@acme.io",
+                action="Disabled cloud account" if disabled else "Enabled cloud account",
+                subject=f"{account.name} · {account.account_identifier}",
+                details=f"Bulk action on {len(ids)} account(s)",
+                event_metadata=[{"key": "cloud_account_id", "value": str(account.id)}],
+            )
+        )
+
+    db.commit()
+    result.succeeded_count = len(result.succeeded)
+    result.failed_count = len(result.failed)
+    return result
 
 
 @router.get("/{account_id}/setup-preview")
