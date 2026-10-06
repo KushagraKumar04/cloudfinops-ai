@@ -84,6 +84,20 @@ def get_current_user(
     return user
 
 
+def get_current_superuser(
+    user: User = Depends(get_current_user),
+) -> User:
+    settings = get_settings()
+    if settings.auth_disabled:
+        return user
+    if not user.is_superuser:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Superuser access required",
+        )
+    return user
+
+
 def get_current_membership(
     db: Session = Depends(get_db),
     user: User | None = Depends(get_current_user_optional),
