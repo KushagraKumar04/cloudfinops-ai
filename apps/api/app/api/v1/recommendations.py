@@ -15,6 +15,7 @@ from app.models.execution import Approval
 from app.models.recommendation import Recommendation
 from app.models.resource import Resource
 from app.models.tenant import Tenant
+from app.schemas.bulk import BulkActionResult, BulkRecommendationDecisionIn
 from app.schemas.recommendation import (
     DecisionIn,
     EvidenceOut,
@@ -181,20 +182,13 @@ def get_recommendation(
     return _to_out(rec, resource, account)
 
 
-def _decide(
+def _apply_decision(
     db: Session,
     tenant: Tenant,
-    recommendation_id: uuid.UUID,
+    rec: Recommendation,
     decision: str,
     reason: str | None,
-) -> RecommendationOut:
-    rec = _load_recommendation(db, tenant.id, recommendation_id)
-
-    if rec.status != "pending":
-        raise HTTPException(status_code=409, detail=f"Recommendation is {rec.status}")
-    if rec.risk == "BLOCKED":
-        raise HTTPException(status_code=409, detail="Recommendation is blocked by policy")
-
+) -> None:
     status_map = {"approve": "approved", "reject": "rejected", "defer": "deferred"}
     new_status = status_map[decision]
 
@@ -225,8 +219,6 @@ def _decide(
             ],
         )
     )
-    db.commit()
-    db.refresh(rec)
 
     if decision == "approve" and rec.risk == "HIGH":
         dispatch_event(
@@ -238,11 +230,77 @@ def _decide(
             f"Approver: demo.user@acme.io\nRecommendation: {rec.id}\nRisk: {rec.risk}\n"
             f"Estimated savings: ${float(rec.estimated_monthly_savings):,.2f}/mo",
             {"recommendation_id": str(rec.id), "risk": rec.risk},
+            commit=False,
         )
+
+
+def _decide(
+    db: Session,
+    tenant: Tenant,
+    recommendation_id: uuid.UUID,
+    decision: str,
+    reason: str | None,
+) -> RecommendationOut:
+    rec = _load_recommendation(db, tenant.id, recommendation_id)
+
+    if rec.status != "pending":
+        raise HTTPException(status_code=409, detail=f"Recommendation is {rec.status}")
+    if rec.risk == "BLOCKED":
+        raise HTTPException(status_code=409, detail="Recommendation is blocked by policy")
+
+    _apply_decision(db, tenant, rec, decision, reason)
+    db.commit()
+    db.refresh(rec)
 
     resource = db.get(Resource, rec.resource_id)
     account = db.get(CloudAccount, resource.cloud_account_id) if resource else None
     return _to_out(rec, resource, account)
+
+
+@router.post("/bulk-decide", response_model=BulkActionResult)
+def bulk_decide_recommendations(
+    payload: BulkRecommendationDecisionIn,
+    db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_current_tenant),
+) -> BulkActionResult:
+    if payload.action == "reject" and (not payload.reason or not payload.reason.strip()):
+        raise HTTPException(status_code=422, detail="Reason is required for rejection")
+
+    result = BulkActionResult(total=len(payload.ids))
+
+    stmt = (
+        select(Recommendation)
+        .options(selectinload(Recommendation.evidence), selectinload(Recommendation.approvals))
+        .where(
+            Recommendation.tenant_id == tenant.id,
+            Recommendation.id.in_(payload.ids),
+        )
+    )
+    found = {r.id: r for r in db.execute(stmt).scalars().all()}
+
+    for rec_id in payload.ids:
+        rec = found.get(rec_id)
+        if rec is None:
+            result.failed.append({"id": str(rec_id), "error": "Not found"})
+            continue
+        if rec.status != "pending":
+            result.failed.append({"id": str(rec_id), "error": f"Status is {rec.status}"})
+            continue
+        if rec.risk == "BLOCKED":
+            result.failed.append({"id": str(rec_id), "error": "Blocked by policy"})
+            continue
+
+        try:
+            _apply_decision(db, tenant, rec, payload.action, payload.reason)
+            result.succeeded.append(rec_id)
+        except Exception as exc:
+            result.failed.append({"id": str(rec_id), "error": str(exc)[:200]})
+
+    db.commit()
+
+    result.succeeded_count = len(result.succeeded)
+    result.failed_count = len(result.failed)
+    return result
 
 
 @router.post(
