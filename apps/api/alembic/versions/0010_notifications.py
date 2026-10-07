@@ -70,3 +70,19 @@ def upgrade() -> None:
     op.create_index("ix_notifications_status", "notifications", ["status"])
     op.create_index("ix_notifications_created_at", "notifications", ["created_at"])
 
+
+def downgrade() -> None:
+    op.drop_index("ix_notifications_created_at", table_name="notifications")
+    op.drop_index("ix_notifications_status", table_name="notifications")
+    op.drop_index("ix_notifications_channel", table_name="notifications")
+    op.drop_index("ix_notifications_severity", table_name="notifications")
+    op.drop_index("ix_notifications_event_type", table_name="notifications")
+    op.drop_index("ix_notifications_rule_id", table_name="notifications")
+    op.drop_index("ix_notifications_tenant_id", table_name="notifications")
+    op.drop_table("notifications")
+
+    op.drop_index("ix_notification_rules_enabled", table_name="notification_rules")
+    op.drop_index("ix_notification_rules_channel", table_name="notification_rules")
+    op.drop_index("ix_notification_rules_event_type", table_name="notification_rules")
+    op.drop_index("ix_notification_rules_tenant_id", table_name="notification_rules")
+    op.drop_table("notification_rules")
