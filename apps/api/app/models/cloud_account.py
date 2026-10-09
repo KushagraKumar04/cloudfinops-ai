@@ -30,6 +30,7 @@ class CloudAccount(Base):
     encrypted_client_secret: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     connection_verified: Mapped[bool] = mapped_column(Boolean, default=False)
     connection_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     regions: Mapped[list[str]] = mapped_column(JSON, default=list)
     read_only: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -40,6 +41,12 @@ class CloudAccount(Base):
     last_sync_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
     coverage: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
+    sync_phase: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    sync_progress_pct: Mapped[int] = mapped_column(default=0)
+    sync_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sync_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sync_error_count: Mapped[int] = mapped_column(default=0)
+
     resource_count: Mapped[int] = mapped_column(default=0)
     monthly_spend: Mapped[float] = mapped_column(Numeric(18, 2), default=0)
     currency: Mapped[str] = mapped_column(String(8), default="USD")
@@ -48,6 +55,10 @@ class CloudAccount(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+    @property
+    def disabled(self) -> bool:
+        return self.disabled_at is not None
 
     tenant: Mapped["Tenant"] = relationship(back_populates="cloud_accounts")
     resources: Mapped[list["Resource"]] = relationship(
