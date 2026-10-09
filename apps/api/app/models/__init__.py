@@ -1,5 +1,6 @@
 from app.models.anomaly import Anomaly
 from app.models.audit import AuditEvent
+from app.models.audit_export import AuditExport
 from app.models.budget import Budget
 from app.models.chat import AgentRun, ChatSession, ToolCall
 from app.models.chat_message import ChatMessage
@@ -19,6 +20,7 @@ from app.models.kubernetes import (
     KubernetesWorkload,
 )
 from app.models.notification import Notification, NotificationRule
+from app.models.password_reset import PasswordResetToken
 from app.models.metric import MetricRecord
 from app.models.price import PriceRecord
 from app.models.recommendation import Recommendation, RecommendationEvidence
@@ -52,7 +54,9 @@ __all__ = [
     "KubernetesCostAllocation",
     "NotificationRule",
     "Notification",
+    "PasswordResetToken",
     "AuditEvent",
+    "AuditExport",
     "ChatSession",
     "ChatMessage",
     "AgentRun",
