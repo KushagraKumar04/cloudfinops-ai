@@ -1,3 +1,4 @@
+import logging
 import uuid
 from datetime import date, timedelta
 from decimal import Decimal
@@ -13,7 +14,11 @@ from app.config import get_settings
 from app.models.cloud_account import CloudAccount
 from app.models.cost import CostRecord
 from app.models.resource import Resource
-from app.services.encryption import decrypt_secret
+from app.services.aws_costs import fetch_costs as fetch_aws_costs
+from app.services.aws_discovery import discover_all
+from app.services.aws_metrics import fetch_metrics_for_resources
+
+logger = logging.getLogger("app.adapters.aws")
 
 BOTO_CONFIG = Config(retries={"max_attempts": 3, "mode": "standard"}, connect_timeout=10, read_timeout=30)
 
@@ -86,39 +91,17 @@ class AWSAdapter:
                 for r in rows
             ]
 
+        settings = get_settings()
+        enabled = [s.strip() for s in settings.aws_discovery_services.split(",") if s.strip()]
+
         try:
             session = self._session_for(account)
-        except Exception:
+        except (ClientError, BotoCoreError, ValueError) as exc:
+            logger.warning("AssumeRole failed for %s: %s", account.id, exc)
             return []
-        out: list[dict[str, Any]] = []
-        for region in account.regions or ["us-east-1"]:
-            try:
-                ec2 = session.client("ec2", region_name=region, config=BOTO_CONFIG)
-                for reservation in ec2.describe_instances().get("Reservations", []):
-                    for inst in reservation.get("Instances", []):
-                        state = inst.get("State", {}).get("Name", "unknown")
-                        tags = {t["Key"]: t["Value"] for t in inst.get("Tags", [])}
-                        out.append(
-                            {
-                                "cloud_id": inst["InstanceId"],
-                                "name": tags.get("Name", inst["InstanceId"]),
-                                "type": f"EC2 {inst.get('InstanceType', 'unknown')}",
-                                "service": "EC2",
-                                "region": region,
-                                "environment": tags.get("env", "unknown"),
-                                "status": state,
-                                "application": tags.get("app", "unknown"),
-                                "owner": tags.get("owner", "unassigned"),
-                                "tags": [{"key": k, "value": v} for k, v in tags.items()],
-                                "utilization": {},
-                                "series": {},
-                                "metric_coverage": 0.0,
-                                "monthly_cost": 0.0,
-                            }
-                        )
-            except (ClientError, BotoCoreError):
-                continue
-        return out
+
+        regions = account.regions or ["us-east-1"]
+        return discover_all(session, account.account_identifier, regions, enabled)
 
     def get_costs(
         self,
@@ -155,45 +138,11 @@ class AWSAdapter:
 
         try:
             session = self._session_for(account)
-        except Exception:
-            return []
-        try:
-            ce = session.client("ce", region_name="us-east-1", config=BOTO_CONFIG)
-            response = ce.get_cost_and_usage(
-                TimePeriod={"Start": start.isoformat(), "End": (end + timedelta(days=1)).isoformat()},
-                Granularity="DAILY",
-                Metrics=["UnblendedCost"],
-                GroupBy=[
-                    {"Type": "DIMENSION", "Key": "SERVICE"},
-                    {"Type": "DIMENSION", "Key": "REGION"},
-                ],
-            )
-        except (ClientError, BotoCoreError):
+        except (ClientError, BotoCoreError, ValueError) as exc:
+            logger.warning("AssumeRole failed for %s: %s", account.id, exc)
             return []
 
-        out: list[dict[str, Any]] = []
-        for bucket in response.get("ResultsByTime", []):
-            bucket_date = bucket["TimePeriod"]["Start"]
-            for group in bucket.get("Groups", []):
-                keys = group["Keys"]
-                amount = Decimal(group["Metrics"]["UnblendedCost"]["Amount"])
-                service = keys[0] if len(keys) > 0 else "Unknown"
-                region = keys[1] if len(keys) > 1 else "global"
-                if amount <= 0:
-                    continue
-                out.append(
-                    {
-                        "date": bucket_date,
-                        "service": service,
-                        "region": region,
-                        "resource_id": None,
-                        "cost": float(amount),
-                        "currency": group["Metrics"]["UnblendedCost"].get("Unit", "USD"),
-                        "usage_quantity": 0.0,
-                        "usage_unit": "",
-                    }
-                )
-        return out
+        return fetch_aws_costs(session, start, end)
 
     def get_metrics(
         self,
@@ -202,7 +151,57 @@ class AWSAdapter:
         start: date,
         end: date,
     ) -> list[dict[str, Any]]:
-        return []
+        if not resource_ids:
+            return []
+
+        rows = list(
+            db.execute(select(Resource).where(Resource.id.in_(resource_ids))).scalars().all()
+        )
+        if not rows:
+            return []
+
+        if get_settings().mock_adapters:
+            return []
+
+        account_ids = {r.cloud_account_id for r in rows}
+        if len(account_ids) != 1:
+            return []
+        account = db.get(CloudAccount, next(iter(account_ids)))
+        if account is None or account.provider != self.provider:
+            return []
+
+        settings = get_settings()
+        days = max(1, (end - start).days + 1)
+
+        try:
+            session = self._session_for(account)
+        except (ClientError, BotoCoreError, ValueError) as exc:
+            logger.warning("AssumeRole failed for %s: %s", account.id, exc)
+            return []
+
+        payload = [
+            {"cloud_id": r.cloud_id, "service": r.service, "region": r.region}
+            for r in rows
+        ]
+        regions = sorted({r.region for r in rows if r.region})
+        metrics = fetch_metrics_for_resources(session, payload, regions, days)
+
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            data = metrics.get(r.cloud_id)
+            if data is None:
+                continue
+            out.append(
+                {
+                    "resource_id": str(r.id),
+                    "cloud_id": r.cloud_id,
+                    "cpu": data.get("cpu"),
+                    "memory": data.get("memory"),
+                    "series": data.get("series", {}),
+                    "coverage": data.get("coverage", 0.0),
+                }
+            )
+        return out
 
     def get_prices(self, resource_type: str, region: str) -> list[dict[str, Any]]:
         return []
@@ -224,9 +223,8 @@ class AWSAdapter:
             return self._mock_execute(resource_cloud_id, action, params)
         try:
             session = self._session_for(account)
-        except Exception as exc:
+        except (ClientError, BotoCoreError, ValueError) as exc:
             return {"ok": False, "error": f"AssumeRole failed: {exc}"}
-
         try:
             return self._live_execute(session, account, resource_cloud_id, action, params)
         except (ClientError, BotoCoreError) as exc:
@@ -362,4 +360,4 @@ class AWSAdapter:
                 "rollback_reference": f"rollback:{bucket}:disable_tiering",
             }
 
-        return {"ok": False, "error": f"Unsupported action: {action}"}    
+        return {"ok": False, "error": f"Unsupported action: {action}"}
