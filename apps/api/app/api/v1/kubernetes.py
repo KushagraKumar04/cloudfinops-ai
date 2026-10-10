@@ -84,3 +84,15 @@ def get_kubernetes_cluster(
     return ClusterDetail(cluster=cluster_out, namespaces=namespaces, workloads=workloads)
 
 
+@router.get("/clusters/{cluster_id}/namespaces", response_model=list[NamespaceOut])
+def get_cluster_namespaces(
+    cluster_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_current_tenant),
+) -> list[NamespaceOut]:
+    cluster = get_cluster(db, tenant.id, cluster_id)
+    if cluster is None:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+    return [NamespaceOut.model_validate(n) for n in list_namespaces(db, tenant.id, cluster_id)]
+
+
