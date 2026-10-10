@@ -130,3 +130,5 @@ class OpenAICompatibleProvider:
         choices = payload.get("choices") or []
         if not choices:
             raise LLMError("LLM returned no choices")
+
+        message = choices[0].get("message") or {}
