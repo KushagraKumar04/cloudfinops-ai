@@ -96,3 +96,21 @@ def get_cluster_namespaces(
     return [NamespaceOut.model_validate(n) for n in list_namespaces(db, tenant.id, cluster_id)]
 
 
+@router.get("/clusters/{cluster_id}/workloads", response_model=list[WorkloadOut])
+def get_cluster_workloads(
+    cluster_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_current_tenant),
+    namespace_id: uuid.UUID | None = Query(default=None),
+) -> list[WorkloadOut]:
+    cluster = get_cluster(db, tenant.id, cluster_id)
+    if cluster is None:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+    ns_names = {n.id: n.name for n in list_namespaces(db, tenant.id, cluster_id)}
+    out: list[WorkloadOut] = []
+    for w in list_workloads(db, tenant.id, cluster_id, namespace_id):
+        item = WorkloadOut.model_validate(w)
+        item.namespace_name = ns_names.get(w.namespace_id, "")
+        out.append(item)
+    return out
+
