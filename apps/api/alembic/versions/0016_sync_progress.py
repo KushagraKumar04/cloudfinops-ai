@@ -14,3 +14,12 @@ revision: str = "0016_sync_progress"
 down_revision: Union[str, None] = "0015_password_reset"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    op.add_column("cloud_accounts", sa.Column("sync_phase", sa.String(length=32), nullable=True))
+    op.add_column("cloud_accounts", sa.Column("sync_progress_pct", sa.Integer(), nullable=False, server_default="0"))
+    op.add_column("cloud_accounts", sa.Column("sync_started_at", sa.DateTime(timezone=True), nullable=True))
+    op.add_column("cloud_accounts", sa.Column("sync_completed_at", sa.DateTime(timezone=True), nullable=True))
+    op.add_column("cloud_accounts", sa.Column("sync_error_count", sa.Integer(), nullable=False, server_default="0"))
+
