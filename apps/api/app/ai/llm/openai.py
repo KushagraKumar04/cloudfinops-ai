@@ -136,3 +136,5 @@ class OpenAICompatibleProvider:
         for tc in message.get("tool_calls") or []:
             function = tc.get("function") or {}
             raw_args = function.get("arguments") or "{}"
+            try:
+                args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
