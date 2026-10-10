@@ -114,3 +114,16 @@ def get_cluster_workloads(
         out.append(item)
     return out
 
+
+@router.get("/clusters/{cluster_id}/trends", response_model=list[CostTrendPoint])
+def get_cluster_trends(
+    cluster_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_current_tenant),
+    days: int = Query(default=30, ge=7, le=180),
+) -> list[CostTrendPoint]:
+    cluster = get_cluster(db, tenant.id, cluster_id)
+    if cluster is None:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+    rows = cost_trends(db, tenant.id, cluster_id, days)
+    return [CostTrendPoint(**r) for r in rows]
