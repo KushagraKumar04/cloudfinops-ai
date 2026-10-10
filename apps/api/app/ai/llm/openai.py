@@ -134,3 +134,5 @@ class OpenAICompatibleProvider:
         message = choices[0].get("message") or {}
         tool_calls: list[ToolCall] = []
         for tc in message.get("tool_calls") or []:
+            function = tc.get("function") or {}
+            raw_args = function.get("arguments") or "{}"
