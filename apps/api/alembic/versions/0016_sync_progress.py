@@ -23,3 +23,10 @@ def upgrade() -> None:
     op.add_column("cloud_accounts", sa.Column("sync_completed_at", sa.DateTime(timezone=True), nullable=True))
     op.add_column("cloud_accounts", sa.Column("sync_error_count", sa.Integer(), nullable=False, server_default="0"))
 
+
+def downgrade() -> None:
+    op.drop_column("cloud_accounts", "sync_error_count")
+    op.drop_column("cloud_accounts", "sync_completed_at")
+    op.drop_column("cloud_accounts", "sync_started_at")
+    op.drop_column("cloud_accounts", "sync_progress_pct")
+    op.drop_column("cloud_accounts", "sync_phase")
