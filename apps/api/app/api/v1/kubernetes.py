@@ -42,3 +42,21 @@ def _to_cluster_out(
     return base
 
 
+@router.get("/clusters", response_model=ClusterListOut)
+def list_kubernetes_clusters(
+    db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_current_tenant),
+) -> ClusterListOut:
+    clusters = list_clusters(db, tenant.id)
+    account_names = account_name_map(db, tenant.id, {c.cloud_account_id for c in clusters})
+    items: list[ClusterOut] = []
+    for c in clusters:
+        counts = cluster_counts(db, tenant.id, c.id)
+        items.append(_to_cluster_out(c, account_names.get(c.cloud_account_id, ""), counts))
+    return ClusterListOut(
+        items=items,
+        total=len(items),
+        aggregates=aggregate_summary(clusters),
+    )
+
+
