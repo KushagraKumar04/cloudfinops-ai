@@ -14,3 +14,15 @@ from app.schemas.kubernetes import (
     NamespaceOut,
     WorkloadOut,
 )
+from app.services.kubernetes import (
+    account_name_map,
+    aggregate_summary,
+    cluster_counts,
+    cost_trends,
+    get_cluster,
+    list_clusters,
+    list_namespaces,
+    list_workloads,
+)
+
+router = APIRouter(prefix="/kubernetes", tags=["kubernetes"])
