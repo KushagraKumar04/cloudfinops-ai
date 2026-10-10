@@ -140,3 +140,5 @@ class OpenAICompatibleProvider:
                 args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
             except ValueError:
                 args = {}
+            tool_calls.append(ToolCall(id=tc.get("id", ""), name=function.get("name", ""), args=args))
+
