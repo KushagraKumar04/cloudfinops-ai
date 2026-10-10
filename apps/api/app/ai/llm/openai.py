@@ -138,3 +138,5 @@ class OpenAICompatibleProvider:
             raw_args = function.get("arguments") or "{}"
             try:
                 args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+            except ValueError:
+                args = {}
