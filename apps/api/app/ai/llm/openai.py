@@ -79,3 +79,31 @@ class OpenAICompatibleProvider:
             }
             for t in tools
         ]
+
+    def chat(
+        self,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        force_json: bool = True,
+        tool_choice: str | None = None,
+    ) -> LLMResponse:
+        body: dict[str, Any] = {
+            "messages": self._serialize_messages(messages),
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if not self._azure:
+            body["model"] = model
+        if tools:
+            body["tools"] = self._serialize_tools(tools)
+            if tool_choice == "required":
+                body["tool_choice"] = "required"
+            elif tool_choice == "none":
+                body["tool_choice"] = "none"
+            else:
+                body["tool_choice"] = tool_choice or "auto"
+        if force_json and not tools and tool_choice != "none":
+            body["response_format"] = {"type": "json_object"}
