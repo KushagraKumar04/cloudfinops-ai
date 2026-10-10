@@ -28,3 +28,24 @@ class OpenAICompatibleProvider:
         self._azure = azure
         self._timeout = timeout
 
+    def _url(self, model: str) -> str:
+        if self._azure:
+            return f"{self._endpoint}/openai/deployments/{model}/chat/completions?api-version={self._api_version}"
+        return f"{self._endpoint}/chat/completions"
+
+    def _headers(self) -> dict[str, str]:
+        if self._azure:
+            return {"api-key": self._api_key, "Content-Type": "application/json"}
+        return {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
+
+    def _serialize_messages(self, messages: list[Message]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for m in messages:
+            if m.role == "tool":
+                out.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": m.tool_call_id or "",
+                        "content": m.content or "",
+                    }
+                )
