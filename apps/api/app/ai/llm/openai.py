@@ -107,3 +107,26 @@ class OpenAICompatibleProvider:
                 body["tool_choice"] = tool_choice or "auto"
         if force_json and not tools and tool_choice != "none":
             body["response_format"] = {"type": "json_object"}
+
+        try:
+            with httpx.Client(timeout=self._timeout) as client:
+                response = client.post(self._url(model), headers=self._headers(), json=body)
+                if response.status_code == 429:
+                    import time as _time
+
+                    _time.sleep(1.2)
+                    response = client.post(self._url(model), headers=self._headers(), json=body)
+        except httpx.HTTPError as exc:
+            raise LLMError(f"LLM request failed: {exc}") from exc
+
+        if response.status_code >= 400:
+            raise LLMError(f"LLM returned {response.status_code}: {response.text[:300]}")
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise LLMError("LLM response was not JSON") from exc
+
+        choices = payload.get("choices") or []
+        if not choices:
+            raise LLMError("LLM returned no choices")
