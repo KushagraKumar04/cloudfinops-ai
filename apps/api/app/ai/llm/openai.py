@@ -142,3 +142,5 @@ class OpenAICompatibleProvider:
                 args = {}
             tool_calls.append(ToolCall(id=tc.get("id", ""), name=function.get("name", ""), args=args))
 
+        usage = payload.get("usage") or {}
+        return LLMResponse(
