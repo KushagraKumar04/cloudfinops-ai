@@ -144,3 +144,5 @@ class OpenAICompatibleProvider:
 
         usage = payload.get("usage") or {}
         return LLMResponse(
+            content=message.get("content"),
+            tool_calls=tool_calls,
