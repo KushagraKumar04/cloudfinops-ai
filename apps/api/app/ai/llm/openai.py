@@ -146,3 +146,5 @@ class OpenAICompatibleProvider:
         return LLMResponse(
             content=message.get("content"),
             tool_calls=tool_calls,
+            input_tokens=int(usage.get("prompt_tokens", 0)),
+            output_tokens=int(usage.get("completion_tokens", 0)),
