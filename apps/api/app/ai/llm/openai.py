@@ -49,3 +49,33 @@ class OpenAICompatibleProvider:
                         "content": m.content or "",
                     }
                 )
+                continue
+            entry: dict[str, Any] = {"role": m.role}
+            if m.content is not None:
+                entry["content"] = m.content
+            if m.tool_calls:
+                entry["tool_calls"] = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.name, "arguments": json.dumps(tc.args)},
+                    }
+                    for tc in m.tool_calls
+                ]
+            if m.role == "assistant" and m.content is None and not m.tool_calls:
+                entry["content"] = ""
+            out.append(entry)
+        return out
+
+    def _serialize_tools(self, tools: list[ToolSpec]) -> list[dict[str, Any]]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                },
+            }
+            for t in tools
+        ]
