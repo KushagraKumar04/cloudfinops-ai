@@ -26,3 +26,19 @@ from app.services.kubernetes import (
 )
 
 router = APIRouter(prefix="/kubernetes", tags=["kubernetes"])
+
+
+def _to_cluster_out(
+    cluster,
+    account_name: str,
+    counts: dict,
+) -> ClusterOut:
+    base = ClusterOut.model_validate(cluster)
+    base.account_name = account_name
+    base.namespace_count = int(counts["namespace_count"])
+    base.workload_count = int(counts["workload_count"])
+    base.over_provisioned_count = int(counts["over_provisioned_count"])
+    base.potential_savings = round(float(counts["potential_savings"]), 2)
+    return base
+
+
