@@ -70,3 +70,15 @@ def commitment_summary(
         on_demand_risk_pct=snap["on_demand_risk_pct"],
     )
 
+
+@router.get("", response_model=CommitmentListOut)
+def list_commitments_endpoint(
+    db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_current_tenant),
+    provider: str | None = Query(default=None),
+) -> CommitmentListOut:
+    rows = list_commitments(db, tenant.id, provider)
+    names = account_name_map(db, tenant.id, {r.cloud_account_id for r in rows})
+    items = [_commitment_to_out(r, names.get(r.cloud_account_id, "")) for r in rows]
+    return CommitmentListOut(items=items, total=len(items))
+
