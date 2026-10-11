@@ -82,3 +82,27 @@ def list_commitments_endpoint(
     items = [_commitment_to_out(r, names.get(r.cloud_account_id, "")) for r in rows]
     return CommitmentListOut(items=items, total=len(items))
 
+
+@router.get("/recommendations", response_model=CommitmentRecommendationList)
+def list_recommendations_endpoint(
+    db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_current_tenant),
+    status: str | None = Query(default="pending"),
+    provider: str | None = Query(default=None),
+) -> CommitmentRecommendationList:
+    rows = list_recommendations(db, tenant.id, status=status, provider=provider)
+    names = account_name_map(db, tenant.id, {r.cloud_account_id for r in rows})
+    items = [_recommendation_to_out(r, names.get(r.cloud_account_id, "")) for r in rows]
+
+    totals = {
+        "pending": sum(1 for r in items if r.status == "pending"),
+        "approved": sum(1 for r in items if r.status == "approved"),
+        "rejected": sum(1 for r in items if r.status == "rejected"),
+        "deferred": sum(1 for r in items if r.status == "deferred"),
+        "pending_savings": round(sum(r.estimated_monthly_savings for r in items if r.status == "pending"), 2),
+        "approved_savings": round(sum(r.estimated_monthly_savings for r in items if r.status == "approved"), 2),
+    }
+
+    return CommitmentRecommendationList(items=items, total=len(items), totals=totals)
+
+
