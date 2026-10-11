@@ -30,3 +30,17 @@ from app.services.commitments import (
 )
 
 router = APIRouter(prefix="/commitments", tags=["commitments"])
+
+
+def _commitment_to_out(commitment, account_name: str) -> CommitmentOut:
+    base = CommitmentOut.model_validate(commitment)
+    base.account_name = account_name
+    return base
+
+
+def _recommendation_to_out(rec: CommitmentRecommendation, account_name: str) -> CommitmentRecommendationOut:
+    base = CommitmentRecommendationOut.model_validate(rec)
+    base.account_name = account_name
+    base.history = [CommitmentApprovalOut.model_validate(a) for a in sorted(rec.approvals, key=lambda x: x.created_at)]
+    return base
+
