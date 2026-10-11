@@ -106,3 +106,16 @@ def list_recommendations_endpoint(
     return CommitmentRecommendationList(items=items, total=len(items), totals=totals)
 
 
+@router.get("/recommendations/{recommendation_id}", response_model=CommitmentRecommendationOut)
+def get_recommendation_endpoint(
+    recommendation_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_current_tenant),
+) -> CommitmentRecommendationOut:
+    rec = get_recommendation(db, tenant.id, recommendation_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="Commitment recommendation not found")
+    names = account_name_map(db, tenant.id, {rec.cloud_account_id})
+    return _recommendation_to_out(rec, names.get(rec.cloud_account_id, ""))
+
+
