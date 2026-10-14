@@ -119,3 +119,100 @@ def get_recommendation_endpoint(
     return _recommendation_to_out(rec, names.get(rec.cloud_account_id, ""))
 
 
+def _write_audit(
+    db: Session,
+    tenant: Tenant,
+    rec: CommitmentRecommendation,
+    decision: str,
+    reason: str | None,
+    approver: str,
+) -> None:
+    db.add(
+        AuditEvent(
+            tenant_id=tenant.id,
+            at=datetime.now(UTC),
+            category="recommendation",
+            severity="info",
+            actor=approver,
+            action=decision.capitalize(),
+            subject=f"{rec.id} · {rec.title}",
+            details=reason or f"{decision}d commitment recommendation",
+            event_metadata=[
+                {"key": "commitment_recommendation_id", "value": str(rec.id)},
+                {"key": "decision", "value": decision},
+            ],
+        )
+    )
+
+
+def _decide(
+    db: Session,
+    tenant: Tenant,
+    user: User,
+    recommendation_id: uuid.UUID,
+    decision: str,
+    reason: str | None,
+) -> CommitmentRecommendationOut:
+    rec = get_recommendation(db, tenant.id, recommendation_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="Commitment recommendation not found")
+    if rec.status != "pending":
+        raise HTTPException(status_code=409, detail=f"Recommendation is {rec.status}")
+    if rec.risk == "BLOCKED":
+        raise HTTPException(status_code=409, detail="Recommendation is blocked by policy")
+
+    approver = user.email or "system"
+    updated = apply_decision(db, rec, decision, reason, approver)
+    _write_audit(db, tenant, updated, decision, reason, approver)
+    db.commit()
+    db.refresh(updated)
+
+    names = account_name_map(db, tenant.id, {updated.cloud_account_id})
+    return _recommendation_to_out(updated, names.get(updated.cloud_account_id, ""))
+
+
+@router.post(
+    "/recommendations/{recommendation_id}/approve",
+    response_model=CommitmentRecommendationOut,
+    dependencies=[Depends(require_permission(Permission.MANAGE_COMMITMENTS))],
+)
+def approve_recommendation(
+    recommendation_id: uuid.UUID,
+    payload: CommitmentDecisionIn,
+    db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_current_tenant),
+    user: User = Depends(get_current_user),
+) -> CommitmentRecommendationOut:
+    return _decide(db, tenant, user, recommendation_id, "approve", payload.reason)
+
+
+@router.post(
+    "/recommendations/{recommendation_id}/reject",
+    response_model=CommitmentRecommendationOut,
+    dependencies=[Depends(require_permission(Permission.MANAGE_COMMITMENTS))],
+)
+def reject_recommendation(
+    recommendation_id: uuid.UUID,
+    payload: CommitmentDecisionIn,
+    db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_current_tenant),
+    user: User = Depends(get_current_user),
+) -> CommitmentRecommendationOut:
+    if not payload.reason or not payload.reason.strip():
+        raise HTTPException(status_code=422, detail="Reason is required for rejection")
+    return _decide(db, tenant, user, recommendation_id, "reject", payload.reason)
+
+
+@router.post(
+    "/recommendations/{recommendation_id}/defer",
+    response_model=CommitmentRecommendationOut,
+    dependencies=[Depends(require_permission(Permission.MANAGE_COMMITMENTS))],
+)
+def defer_recommendation(
+    recommendation_id: uuid.UUID,
+    payload: CommitmentDecisionIn,
+    db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_current_tenant),
+    user: User = Depends(get_current_user),
+) -> CommitmentRecommendationOut:
+    return _decide(db, tenant, user, recommendation_id, "defer", payload.reason)
