@@ -13,3 +13,18 @@ def persist_agent_run(db: Session, tenant_id: uuid.UUID, question: str, result: 
         session_id=None,
         user_message=question,
         plan=result.get("plan", []),
+        response=result.get("response", {}),
+        model=usage.get("model", "rule-based-fallback"),
+        input_tokens=int(usage.get("input_tokens", 0)),
+        output_tokens=int(usage.get("output_tokens", 0)),
+        estimated_cost=usage.get("estimated_cost_usd", 0),
+        latency_ms=sum(int(tc.get("duration_ms", 0)) for tc in result.get("tool_calls", [])),
+    )
+    db.add(run)
+    db.flush()
+
+    for tc in result.get("tool_calls", []):
+        db.add(
+            ToolCall(
+                agent_run_id=run.id,
+                name=tc.get("name", ""),
