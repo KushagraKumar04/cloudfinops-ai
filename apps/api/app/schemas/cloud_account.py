@@ -26,11 +26,18 @@ class CloudAccountOut(CamelModel):
     regions: list[str] = Field(default_factory=list)
     read_only: bool = True
     execution_role_configured: bool = False
+    disabled: bool = False
 
     created_at: datetime
     last_sync_at: datetime | None = None
     last_sync_status: str | None = None
     last_sync_message: str | None = None
+
+    sync_phase: str | None = None
+    sync_progress_pct: int = 0
+    sync_started_at: datetime | None = None
+    sync_completed_at: datetime | None = None
+    sync_error_count: int = 0
 
     coverage: dict[str, SyncCoverage] = Field(default_factory=dict)
     resource_count: int = 0
@@ -43,6 +50,12 @@ class CloudAccountOut(CamelModel):
         if v is None:
             return 0
         return float(v)
+
+    @field_validator("disabled", mode="before")
+    @classmethod
+    def coerce_disabled(cls, v, info):
+        data = info.data
+        return data.get("disabled_at") is not None if v is None else bool(v)
 
 
 class SyncResponse(CamelModel):
