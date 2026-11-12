@@ -1,5 +1,6 @@
 import { NavLink } from 'react-router-dom'
 import { clsx } from 'clsx'
+import { useAuth } from '@/features/auth/useAuth'
 import {
   LayoutDashboard,
   DollarSign,
@@ -15,9 +16,10 @@ import {
   BadgeDollarSign,
   Bell,
   Users,
+  ShieldCheck,
 } from 'lucide-react'
 
-const items = [
+const BASE_ITEMS: { to: string; label: string; icon: typeof LayoutDashboard; end?: boolean }[] = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
   { to: '/costs', label: 'Costs', icon: DollarSign },
   { to: '/resources', label: 'Resources', icon: Server },
@@ -34,7 +36,15 @@ const items = [
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
 ]
 
+const ADMIN_ITEMS: { to: string; label: string; icon: typeof LayoutDashboard; end?: boolean }[] = [
+  { to: '/admin', label: 'Admin', icon: ShieldCheck },
+]
+
 export function Sidebar() {
+  const { user } = useAuth()
+  const isSuperuser = Boolean(user?.isSuperuser)
+  const items = isSuperuser ? [...BASE_ITEMS, ...ADMIN_ITEMS] : BASE_ITEMS
+
   return (
     <aside className="hidden lg:flex w-60 shrink-0 flex-col border-r border-border bg-canvas">
       <div className="flex h-14 items-center gap-2 px-5 border-b border-border">
